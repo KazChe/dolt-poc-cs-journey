@@ -31,8 +31,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&repoDir, "repo", "", "path to the Dolt repo (default $CS_DIR, then cwd)")
 }
 
-// mustStore resolves the Dolt repo directory from --repo, $CS_DIR, or cwd.
-func mustStore() *store.Store {
+// resolveRepoDir resolves the Dolt repo directory from --repo, $CS_DIR, or cwd.
+func resolveRepoDir() string {
 	dir := repoDir
 	if dir == "" {
 		dir = os.Getenv("CS_DIR")
@@ -40,5 +40,10 @@ func mustStore() *store.Store {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
-	return store.New(dir)
+	return dir
+}
+
+// mustStore resolves the Dolt repo directory and returns a store for it.
+func mustStore() *store.Store {
+	return store.New(resolveRepoDir())
 }

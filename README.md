@@ -67,6 +67,21 @@ cs prime --hook-json                                # same, wrapped for a Claude
 Running `cs note` with no `-c` opens an interactive fuzzy picker, which needs a
 real terminal.
 
+## Claude Code hook
+
+`cs setup claude` registers a SessionStart hook so every Claude Code session
+opens with the account snapshot from `cs prime`.
+
+```bash
+cs setup claude                 # install into ./.claude/settings.json (this project)
+cs setup claude --global        # install into ~/.claude/settings.json (all projects)
+cs setup claude --remove        # remove it again
+```
+
+The absolute paths to the `cs` binary and the resolved Dolt repo are baked into
+the hook command, so it fires correctly no matter which project directory Claude
+Code opens in. Re-run the command after moving the binary or the data repo.
+
 ## Configuration
 
 - `--repo <path>` or the `CS_DIR` environment variable selects the Dolt data

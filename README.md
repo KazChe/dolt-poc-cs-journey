@@ -67,6 +67,11 @@ cs prime --hook-json                                # same, wrapped for a Claude
 Running `cs note` with no `-c` opens an interactive fuzzy picker, which needs a
 real terminal.
 
+`cs board` opens a live TUI that lays accounts out as a "parade" across their
+journey stages (onboarding through renewed), one card per customer colored by
+health. It re-queries every few seconds, so it reflects edits made from other
+terminals. Press `r` to refresh now, `q` to quit. Needs a real terminal.
+
 ## Claude Code hook
 
 `cs setup claude` registers a SessionStart hook so every Claude Code session

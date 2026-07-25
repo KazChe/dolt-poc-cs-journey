@@ -104,6 +104,16 @@ customer detail view (open items, recent activity, trajectory), `esc` returns,
 it scrolls horizontally to keep the selected lane in view. Needs a real
 terminal.
 
+Press `c` on a selected card to open a **chat pane** for that account. It shells
+out to Claude Code in headless mode (`claude -p`) and streams the answer into the
+pane, with the account's current state (open items, recent activity, trajectory)
+injected as context each turn. Each customer gets its own persistent Claude
+session, stored in a `chat_sessions` table and resumed on the next chat, so the
+conversation continues where it left off. The chat is read-only: it answers
+questions about the account but does not change any data. `esc` returns to the
+board. This needs the `claude` CLI on your PATH and uses your Claude Code
+authentication (and tokens).
+
 ## Claude Code hook
 
 `cs setup claude` registers a SessionStart hook so every Claude Code session

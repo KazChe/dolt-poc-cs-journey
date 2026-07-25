@@ -10,11 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/KazChe/cs/internal/store"
 )
+
+var textinputBlink tea.Cmd = textinput.Blink
 
 // laneOrder is the customer journey, left to right. A stage not listed here
 // falls into a trailing "other" lane so nothing is silently dropped.
@@ -40,6 +45,7 @@ type mode int
 const (
 	modeBoard mode = iota
 	modeDetail
+	modeChat
 )
 
 type detail struct {
@@ -75,9 +81,24 @@ type Model struct {
 	mode          mode
 	detail        detail
 	detailLoading bool
+
+	// chat pane
+	input     textinput.Model
+	vp        viewport.Model
+	chatCust  customer
+	chatSID   string
+	chatLog   []string
+	chatCur   string
+	streaming bool
+	sub       chan tea.Msg
 }
 
-func New(st *store.Store) Model { return Model{st: st} }
+func New(st *store.Store) Model {
+	ti := textinput.New()
+	ti.Placeholder = "ask about this account…"
+	ti.CharLimit = 500
+	return Model{st: st, input: ti, vp: viewport.New(0, 0)}
+}
 
 func (m Model) Init() tea.Cmd { return tea.Batch(load(m.st), tick()) }
 
@@ -134,6 +155,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+		if m.mode == modeChat {
+			switch msg.String() {
+			case "esc":
+				m.mode = modeBoard
+				m.input.Blur()
+				return m, nil
+			case "enter":
+				if !m.streaming {
+					p := strings.TrimSpace(m.input.Value())
+					if p != "" {
+						m.chatLog = append(m.chatLog, "you: "+p)
+						m.input.Reset()
+						m.streaming = true
+						m.chatCur = ""
+						cmd := m.startTurn(p)
+						m.syncViewport()
+						return m, cmd
+					}
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
 		if m.mode == modeDetail {
 			switch msg.String() {
 			case "esc", "q", "enter", "backspace", "left":
@@ -162,10 +208,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailLoading = true
 				return m, loadDetail(m.st, c)
 			}
+		case "c":
+			if l := m.currentLane(); l != nil && len(l.custs) > 0 {
+				return m, m.openChat(l.custs[m.cardIdx])
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ensureVisible()
+		m.resizeChat()
+		m.syncViewport()
 	case loadedMsg:
 		m.err = msg.err
 		m.lastLoad = time.Now()
@@ -178,6 +230,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailLoading = false
 	case tickMsg:
 		return m, tea.Batch(load(m.st), tick())
+	case chatTextMsg:
+		m.chatCur += msg.text
+		m.syncViewport()
+		return m, listen(m.sub)
+	case chatDoneMsg:
+		m.streaming = false
+		if msg.err != nil {
+			m.chatLog = append(m.chatLog, "error: "+msg.err.Error())
+		} else if strings.TrimSpace(m.chatCur) != "" {
+			m.chatLog = append(m.chatLog, "cs: "+m.chatCur)
+		}
+		if m.chatSID == "" && msg.sid != "" {
+			saveSession(m.st, m.chatCust.id, msg.sid)
+		}
+		if msg.sid != "" {
+			m.chatSID = msg.sid
+		}
+		m.chatCur = ""
+		m.syncViewport()
+		return m, nil
+	case cursor.BlinkMsg:
+		if m.mode == modeChat {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -295,6 +373,9 @@ func healthColor(h string) lipgloss.Color {
 }
 
 func (m Model) View() string {
+	if m.mode == modeChat {
+		return m.chatView()
+	}
 	if m.mode == modeDetail {
 		return m.detailView()
 	}
@@ -318,7 +399,7 @@ func (m Model) View() string {
 	title := titleStyle.Render(fmt.Sprintf("cs board  ·  %d accounts", countCusts(m.lanes)))
 	scroll := scrollBar(start, end, len(m.lanes))
 	foot := footerStyle.Render(fmt.Sprintf(
-		"←/→ lanes · ↑/↓ cards · enter details · r refresh · q quit%s", loadedAt(m.lastLoad)))
+		"←/→ lanes · ↑/↓ cards · enter details · c chat · r refresh · q quit%s", loadedAt(m.lastLoad)))
 
 	out := title + "\n"
 	if scroll != "" {

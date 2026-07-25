@@ -48,3 +48,11 @@ CREATE TABLE IF NOT EXISTS stage_events (
   occurred_at TIMESTAMP NOT NULL,
   INDEX (customer_id, occurred_at)
 );
+
+-- Per-customer Claude Code chat session, so `cs board`'s chat pane can resume
+-- each account's conversation. Also created on demand by the TUI.
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  customer_id VARCHAR(64) PRIMARY KEY,
+  session_id VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

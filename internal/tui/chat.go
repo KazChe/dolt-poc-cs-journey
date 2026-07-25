@@ -1,0 +1,230 @@
+package tui
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/KazChe/cs/internal/store"
+)
+
+// chatTextMsg carries a chunk of assistant text streamed from `claude -p`.
+type chatTextMsg struct{ text string }
+
+// chatDoneMsg ends a turn; sid is the session id claude reported (captured on the
+// first turn so later turns can --resume it), err is any process error.
+type chatDoneMsg struct {
+	sid string
+	err error
+}
+
+// openChat switches into the per-customer chat pane, loading (or preparing to
+// create) that account's persistent Claude session.
+func (m *Model) openChat(c customer) tea.Cmd {
+	m.mode = modeChat
+	m.chatCust = c
+	m.chatLog = []string{fmt.Sprintf("Chat with %s (%s). Ask about this account. Enter to send, esc to go back.", c.name, c.id)}
+	m.chatCur = ""
+	m.streaming = false
+	if m.sub == nil {
+		m.sub = make(chan tea.Msg, 256)
+	}
+	ensureChatTable(m.st)
+	m.chatSID = lookupSession(m.st, c.id)
+
+	m.input.Reset()
+	m.input.Focus()
+	m.resizeChat()
+	m.syncViewport()
+	return textinputBlink
+}
+
+// startTurn fires one chat turn: builds fresh account context, launches claude in
+// a goroutine that streams events onto m.sub, and starts listening for them.
+func (m *Model) startTurn(prompt string) tea.Cmd {
+	ctx := buildContext(m.st, m.chatCust.id)
+	sid := m.chatSID
+	sub := m.sub
+	launch := func() tea.Msg {
+		runClaude(sub, sid, ctx, prompt)
+		return nil
+	}
+	return tea.Batch(launch, listen(sub))
+}
+
+func listen(sub chan tea.Msg) tea.Cmd {
+	return func() tea.Msg { return <-sub }
+}
+
+// runClaude invokes `claude -p` in headless streaming mode and forwards assistant
+// text and a final done signal onto sub. Read-only: no tools are enabled, so the
+// model can answer about the account but cannot change it.
+func runClaude(sub chan tea.Msg, sid, ctx, prompt string) {
+	go func() {
+		args := []string{"-p", "--output-format", "stream-json", "--verbose"}
+		if sid != "" {
+			args = append(args, "--resume", sid)
+		}
+		if ctx != "" {
+			args = append(args, "--append-system-prompt", ctx)
+		}
+		args = append(args, prompt)
+
+		cmd := exec.Command("claude", args...)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			sub <- chatDoneMsg{err: err}
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			sub <- chatDoneMsg{err: err}
+			return
+		}
+
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		var newSID string
+		for sc.Scan() {
+			var ev map[string]any
+			if json.Unmarshal(sc.Bytes(), &ev) != nil {
+				continue
+			}
+			if s, ok := ev["session_id"].(string); ok && s != "" {
+				newSID = s
+			}
+			if ev["type"] == "assistant" {
+				if txt := assistantText(ev); txt != "" {
+					sub <- chatTextMsg{txt}
+				}
+			}
+		}
+		werr := cmd.Wait()
+		sub <- chatDoneMsg{sid: newSID, err: werr}
+	}()
+}
+
+func assistantText(ev map[string]any) string {
+	msg, _ := ev["message"].(map[string]any)
+	content, _ := msg["content"].([]any)
+	var b strings.Builder
+	for _, c := range content {
+		cm, _ := c.(map[string]any)
+		if cm["type"] == "text" {
+			b.WriteString(str(cm["text"]))
+		}
+	}
+	return b.String()
+}
+
+// buildContext renders the account's current state as a plain-text system prompt
+// so the model answers from live data, re-sent each turn since the board changes
+// under a resumed session.
+func buildContext(st *store.Store, id string) string {
+	var b strings.Builder
+	b.WriteString("You are helping a customer-success engineer. Answer questions about the account below using only this data; do not invent facts. Be concise.\n\n")
+
+	head, _ := st.Query("SELECT name,stage,health FROM customers WHERE id=" + q(id))
+	if len(head) > 0 {
+		h := head[0]
+		b.WriteString(fmt.Sprintf("Account: %v (%s)  stage=%v  health=%v\n", h["name"], id, h["stage"], h["health"]))
+	}
+
+	b.WriteString("\nOpen items:\n")
+	items, _ := st.Query("SELECT id,type,priority,title,created_at FROM items WHERE customer_id=" +
+		q(id) + " AND status<>'resolved' ORDER BY created_at")
+	if len(items) == 0 {
+		b.WriteString("  (none)\n")
+	}
+	for _, r := range items {
+		b.WriteString(fmt.Sprintf("  %v p%v %v %v (%s old)\n",
+			str(r["id"]), str(r["priority"]), str(r["type"]), str(r["title"]), ageDays(r["created_at"])))
+	}
+
+	b.WriteString("\nRecent activity:\n")
+	acts, _ := st.Query("SELECT kind,summary,occurred_at FROM activities WHERE customer_id=" +
+		q(id) + " ORDER BY occurred_at DESC LIMIT 8")
+	if len(acts) == 0 {
+		b.WriteString("  (none)\n")
+	}
+	for _, r := range acts {
+		b.WriteString(fmt.Sprintf("  [%v] %v (%s ago)\n", str(r["kind"]), str(r["summary"]), ageDays(r["occurred_at"])))
+	}
+
+	b.WriteString("\nTrajectory:\n")
+	stages, _ := st.Query("SELECT from_stage,to_stage,reason,occurred_at FROM stage_events WHERE customer_id=" +
+		q(id) + " ORDER BY occurred_at")
+	if len(stages) == 0 {
+		b.WriteString("  (no recorded transitions)\n")
+	}
+	for _, r := range stages {
+		reason := ""
+		if s := str(r["reason"]); s != "" && s != "<nil>" {
+			reason = " (" + s + ")"
+		}
+		b.WriteString(fmt.Sprintf("  %v -> %v%s\n", str(r["from_stage"]), str(r["to_stage"]), reason))
+	}
+	return b.String()
+}
+
+func ensureChatTable(st *store.Store) {
+	_ = st.Exec("CREATE TABLE IF NOT EXISTS chat_sessions (" +
+		"customer_id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL, created_at DATETIME)")
+}
+
+func lookupSession(st *store.Store, custID string) string {
+	rows, err := st.Query("SELECT session_id FROM chat_sessions WHERE customer_id=" + q(custID))
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	return str(rows[0]["session_id"])
+}
+
+func saveSession(st *store.Store, custID, sid string) {
+	_ = st.Exec(fmt.Sprintf(
+		"INSERT INTO chat_sessions (customer_id,session_id,created_at) VALUES (%s,%s,NOW())",
+		q(custID), q(sid)))
+}
+
+// resizeChat sizes the transcript viewport and input to the current window.
+func (m *Model) resizeChat() {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	h := m.height - 6
+	if h < 3 {
+		h = 10
+	}
+	m.vp.Width = w
+	m.vp.Height = h
+	m.input.Width = w - 4
+}
+
+func (m *Model) syncViewport() {
+	lines := append([]string{}, m.chatLog...)
+	if m.chatCur != "" {
+		lines = append(lines, "cs: "+m.chatCur)
+	}
+	w := m.vp.Width
+	if w < 20 {
+		w = 60
+	}
+	body := lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n\n"))
+	m.vp.SetContent(body)
+	m.vp.GotoBottom()
+}
+
+func (m Model) chatView() string {
+	status := ""
+	if m.streaming {
+		status = "  · thinking…"
+	}
+	title := titleStyle.Render(fmt.Sprintf("Chat · %s (%s)%s", m.chatCust.name, m.chatCust.id, status))
+	foot := footerStyle.Render("enter send · esc back · ctrl+c quit")
+	return title + "\n" + m.vp.View() + "\n" + m.input.View() + "\n" + foot + "\n"
+}

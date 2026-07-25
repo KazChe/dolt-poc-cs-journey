@@ -70,7 +70,11 @@ real terminal.
 `cs board` opens a live TUI that lays accounts out as a "parade" across their
 journey stages (onboarding through renewed), one card per customer colored by
 health. It re-queries every few seconds, so it reflects edits made from other
-terminals. Press `r` to refresh now, `q` to quit. Needs a real terminal.
+terminals. Arrow keys (or `hjkl`) move the selection, `enter` drills into a
+customer detail view (open items, recent activity, trajectory), `esc` returns,
+`r` refreshes now, and `q` quits. When there are more lanes than fit on screen,
+it scrolls horizontally to keep the selected lane in view. Needs a real
+terminal.
 
 ## Claude Code hook
 

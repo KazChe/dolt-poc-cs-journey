@@ -101,4 +101,7 @@ Code opens in. Re-run the command after moving the binary or the data repo.
 - `cs` currently drives Dolt by shelling out to the `dolt` binary. It can later
   embed Dolt in-process via `dolthub/driver/v2` without changing any command
   code, since every command is just SQL.
-- No license file is included yet. Add one before sharing this publicly.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Use it, fork it, build on it.

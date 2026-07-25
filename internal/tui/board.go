@@ -234,6 +234,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chatCur += msg.text
 		m.syncViewport()
 		return m, listen(m.sub)
+	case chatToolMsg:
+		if strings.TrimSpace(m.chatCur) != "" {
+			m.chatLog = append(m.chatLog, "cs: "+m.chatCur)
+			m.chatCur = ""
+		}
+		m.chatLog = append(m.chatLog, msg.text)
+		m.syncViewport()
+		return m, listen(m.sub)
 	case chatDoneMsg:
 		m.streaming = false
 		if msg.err != nil {

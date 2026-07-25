@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -15,6 +16,10 @@ import (
 
 // chatTextMsg carries a chunk of assistant text streamed from `claude -p`.
 type chatTextMsg struct{ text string }
+
+// chatToolMsg carries a one-line note about a tool the model ran (or a tool
+// error), shown inline in the transcript.
+type chatToolMsg struct{ text string }
 
 // chatDoneMsg ends a turn; sid is the session id claude reported (captured on the
 // first turn so later turns can --resume it), err is any process error.
@@ -28,7 +33,9 @@ type chatDoneMsg struct {
 func (m *Model) openChat(c customer) tea.Cmd {
 	m.mode = modeChat
 	m.chatCust = c
-	m.chatLog = []string{fmt.Sprintf("Chat with %s (%s). Ask about this account. Enter to send, esc to go back.", c.name, c.id)}
+	m.chatLog = []string{fmt.Sprintf(
+		"Chat with %s (%s). Ask about this account, or ask me to update it (changes are committed to history). Enter to send, esc to go back.",
+		c.name, c.id)}
 	m.chatCur = ""
 	m.streaming = false
 	if m.sub == nil {
@@ -44,14 +51,16 @@ func (m *Model) openChat(c customer) tea.Cmd {
 	return textinputBlink
 }
 
-// startTurn fires one chat turn: builds fresh account context, launches claude in
-// a goroutine that streams events onto m.sub, and starts listening for them.
+// startTurn fires one chat turn: builds fresh account context plus the command
+// catalog, launches claude in a goroutine that streams events onto m.sub, and
+// starts listening for them.
 func (m *Model) startTurn(prompt string) tea.Cmd {
-	ctx := buildContext(m.st, m.chatCust.id)
+	sys := buildContext(m.st, m.chatCust.id) + "\n" + toolInstructions(m.chatCust.id)
 	sid := m.chatSID
 	sub := m.sub
+	repo := m.st.Dir
 	launch := func() tea.Msg {
-		runClaude(sub, sid, ctx, prompt)
+		runClaude(sub, sid, sys, prompt, repo)
 		return nil
 	}
 	return tea.Batch(launch, listen(sub))
@@ -61,21 +70,25 @@ func listen(sub chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-sub }
 }
 
-// runClaude invokes `claude -p` in headless streaming mode and forwards assistant
-// text and a final done signal onto sub. Read-only: no tools are enabled, so the
-// model can answer about the account but cannot change it.
-func runClaude(sub chan tea.Msg, sid, ctx, prompt string) {
+// runClaude invokes `claude -p` in headless streaming mode with the Bash tool
+// scoped to `cs` commands, and forwards assistant text, tool activity, and a
+// final done signal onto sub. The prompt goes via stdin because --allowedTools
+// is variadic and would otherwise swallow a positional prompt. CS_DIR is baked
+// into the child env so any cs command the model runs hits the same repo.
+func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir string) {
 	go func() {
-		args := []string{"-p", "--output-format", "stream-json", "--verbose"}
+		args := []string{"-p", "--output-format", "stream-json", "--verbose",
+			"--allowedTools", "Bash(cs:*)"}
 		if sid != "" {
 			args = append(args, "--resume", sid)
 		}
-		if ctx != "" {
-			args = append(args, "--append-system-prompt", ctx)
+		if sysPrompt != "" {
+			args = append(args, "--append-system-prompt", sysPrompt)
 		}
-		args = append(args, prompt)
 
 		cmd := exec.Command("claude", args...)
+		cmd.Stdin = strings.NewReader(prompt)
+		cmd.Env = append(os.Environ(), "CS_DIR="+repoDir)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			sub <- chatDoneMsg{err: err}
@@ -97,9 +110,14 @@ func runClaude(sub chan tea.Msg, sid, ctx, prompt string) {
 			if s, ok := ev["session_id"].(string); ok && s != "" {
 				newSID = s
 			}
-			if ev["type"] == "assistant" {
-				if txt := assistantText(ev); txt != "" {
-					sub <- chatTextMsg{txt}
+			switch ev["type"] {
+			case "assistant":
+				for _, msg := range assistantBlocks(ev) {
+					sub <- msg
+				}
+			case "user":
+				if e := toolResultError(ev); e != "" {
+					sub <- chatToolMsg{text: "✗ " + e}
 				}
 			}
 		}
@@ -108,17 +126,69 @@ func runClaude(sub chan tea.Msg, sid, ctx, prompt string) {
 	}()
 }
 
-func assistantText(ev map[string]any) string {
+// assistantBlocks turns one assistant event into ordered messages: text chunks
+// and a one-line note per Bash command the model invoked.
+func assistantBlocks(ev map[string]any) []tea.Msg {
 	msg, _ := ev["message"].(map[string]any)
 	content, _ := msg["content"].([]any)
-	var b strings.Builder
+	var out []tea.Msg
 	for _, c := range content {
 		cm, _ := c.(map[string]any)
-		if cm["type"] == "text" {
-			b.WriteString(str(cm["text"]))
+		switch cm["type"] {
+		case "text":
+			if t := str(cm["text"]); t != "" {
+				out = append(out, chatTextMsg{t})
+			}
+		case "tool_use":
+			inp, _ := cm["input"].(map[string]any)
+			if cmdStr := str(inp["command"]); cmdStr != "" {
+				out = append(out, chatToolMsg{text: "⚙ " + cmdStr})
+			}
 		}
 	}
-	return b.String()
+	return out
+}
+
+func toolResultError(ev map[string]any) string {
+	msg, _ := ev["message"].(map[string]any)
+	content, _ := msg["content"].([]any)
+	for _, c := range content {
+		cm, _ := c.(map[string]any)
+		if cm["type"] == "tool_result" {
+			if b, _ := cm["is_error"].(bool); b {
+				return firstLine(str(cm["content"]))
+			}
+		}
+	}
+	return ""
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 160 {
+		s = s[:160]
+	}
+	return s
+}
+
+// toolInstructions is the command catalog handed to the model: an explicit,
+// enforced list of what it may run, mirroring a tool-selection contract.
+func toolInstructions(custID string) string {
+	return "You can act on this account by running cs commands with the Bash tool. " +
+		"Only run `cs` commands. The data repo is preselected via CS_DIR, so never pass --repo. " +
+		"Always pass --commit on changes so they persist to history. " +
+		"Target account for any action: " + custID + ". " +
+		"After acting, confirm briefly what you changed. Available commands:\n" +
+		"  cs note -c <id> -k call|slack|email|ticket|meeting|note \"<summary>\" --commit\n" +
+		"  cs item add -c <id> -t bug|feature|question|action -p <1-3> \"<title>\" --commit\n" +
+		"  cs item resolve <item-id> --commit\n" +
+		"  cs item ls -c <id>\n" +
+		"  cs stage <id> <to-stage> --reason \"<why>\" --commit\n" +
+		"  cs link <from-item> <to-item> --rel blocks|relates|raised_in|advances_stage|supersedes --commit\n" +
+		"  cs show <id>\n" +
+		"  cs week <id>\n"
 }
 
 // buildContext renders the account's current state as a plain-text system prompt
@@ -126,7 +196,7 @@ func assistantText(ev map[string]any) string {
 // under a resumed session.
 func buildContext(st *store.Store, id string) string {
 	var b strings.Builder
-	b.WriteString("You are helping a customer-success engineer. Answer questions about the account below using only this data; do not invent facts. Be concise.\n\n")
+	b.WriteString("You are helping a customer-success engineer with one account. Use only the data below; do not invent facts. Be concise.\n\n")
 
 	head, _ := st.Query("SELECT name,stage,health FROM customers WHERE id=" + q(id))
 	if len(head) > 0 {

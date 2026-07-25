@@ -109,9 +109,17 @@ out to Claude Code in headless mode (`claude -p`) and streams the answer into th
 pane, with the account's current state (open items, recent activity, trajectory)
 injected as context each turn. Each customer gets its own persistent Claude
 session, stored in a `chat_sessions` table and resumed on the next chat, so the
-conversation continues where it left off. The chat is read-only: it answers
-questions about the account but does not change any data. `esc` returns to the
-board. This needs the `claude` CLI on your PATH and uses your Claude Code
+conversation continues where it left off.
+
+The chat can also **act on the account** when you ask it to: it is given the
+Bash tool scoped to `cs` commands only, so it can resolve items, log notes,
+change stage, and so on. Commands it runs are shown inline in the transcript
+(`⚙ cs item resolve ...`), it uses `--commit` so every change lands in Dolt
+history (auditable and revertible with `dolt log` / `dolt revert`), and it
+cannot run anything other than `cs`. It only acts when you ask; plain questions
+stay read-only. `esc` returns to the board.
+
+This needs the `claude` and `cs` CLIs on your PATH and uses your Claude Code
 authentication (and tokens).
 
 ## Claude Code hook

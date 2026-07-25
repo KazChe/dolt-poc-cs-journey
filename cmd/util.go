@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -16,9 +17,20 @@ func sqlStr(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// newID returns a unique id like "itm-1737059...".
+const idAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// newID returns a short, typeable id like "itm-k3f9a1". 6 base36 chars is ~2
+// billion values, ample for a single-user tool, and the fuzzy picker means you
+// rarely type one anyway.
 func newID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s-%06x", prefix, time.Now().UnixNano()&0xffffff)
+	}
+	for i := range b {
+		b[i] = idAlphabet[int(b[i])%len(idAlphabet)]
+	}
+	return prefix + "-" + string(b)
 }
 
 // resolveCustomer returns explicit if set, otherwise opens the fuzzy picker.

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -36,7 +35,7 @@ var noteCmd = &cobra.Command{
 			return fmt.Errorf("a note summary is required")
 		}
 
-		id := fmt.Sprintf("act-%d", time.Now().UnixNano())
+		id := newID("act")
 		q := fmt.Sprintf(
 			"INSERT INTO activities (id,customer_id,kind,summary,occurred_at) VALUES (%s,%s,%s,%s,NOW())",
 			sqlStr(id), sqlStr(custID), sqlStr(noteKind), sqlStr(summary))

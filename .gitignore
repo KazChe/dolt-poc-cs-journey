@@ -1,0 +1,14 @@
+# Compiled binary (built with `go build -o cs .`)
+/cs
+
+# Go build / test artifacts
+*.exe
+*.test
+*.out
+/dist/
+
+# Local data repo, if anyone nests one here
+/cs-journey/
+
+# OS / editor cruft
+.DS_Store

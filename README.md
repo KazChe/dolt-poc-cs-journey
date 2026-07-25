@@ -56,16 +56,44 @@ go build -o cs .
 
 ## Usage
 
+A full loop on one account: adding it, updating it, and reading it back. Each
+mutating command takes `--commit` to snapshot the change into Dolt history; omit
+it to stage several edits and commit them yourself later. Point-in-time commands
+like `cs week` read that history, so commit the steps you want to see there.
+
 ```bash
-cs customer add acme "Acme Corp" --stage adoption   # add an account
-cs note                                             # fuzzy-pick a customer, then type the note
-cs note -c acme "cadence call, discussed roadmap"   # or name the customer directly
-cs prime                                            # a bounded snapshot of every account
-cs prime --hook-json                                # same, wrapped for a Claude Code SessionStart hook
+# Add an account (new accounts start in the onboarding stage).
+cs customer add acme "Acme Corp" --commit
+
+# Journal an activity (a call, in this case).
+cs note -c acme -k call "kickoff call, flagged a slow dashboard" --commit
+
+# Add a stateful item to track. Its generated id is printed, e.g. itm-jt4rb3.
+cs item add -c acme -t bug -p 1 "Dashboard loads slowly for admins" --commit
+
+# Advance the journey as onboarding wraps up.
+cs stage acme adoption --reason "onboarding complete" --commit
+
+# See what is still open for the account.
+cs item ls -c acme
+
+# Update the item: resolve it once the fix ships.
+cs item resolve itm-jt4rb3 --commit     # or run `cs item resolve` to fuzzy-pick
+
+# Read the whole trajectory back: state, open items, recent activity, stages.
+cs show acme
+
+# What changed on items in the last 7 days (reads Dolt history).
+cs week acme
+
+# A bounded snapshot of every account (also what the Claude Code hook injects).
+cs prime
 ```
 
-Running `cs note` with no `-c` opens an interactive fuzzy picker, which needs a
-real terminal.
+Most commands take a customer or item id directly, or open an interactive fuzzy
+picker when you omit it (`cs note`, `cs item resolve`, `cs link`), which needs a
+real terminal. Dependencies between items are recorded with `cs link <from> <to>
+--rel blocks`. Run `cs <command> --help` for every flag.
 
 `cs board` opens a live TUI that lays accounts out as a "parade" across their
 journey stages (onboarding through renewed), one card per customer colored by

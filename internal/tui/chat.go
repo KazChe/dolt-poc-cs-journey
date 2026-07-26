@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,16 +52,36 @@ func (m *Model) openChat(c customer) tea.Cmd {
 	return textinputBlink
 }
 
+// csBinary returns the absolute, symlink-resolved path to this running cs
+// binary. The chat pane scopes the model's Bash allowlist to exactly this path
+// (rather than the bare name `cs`), so only our binary is runnable even if some
+// other `cs` sits on PATH. Falls back to "cs" if the path cannot be resolved,
+// so the pane still works rather than blocking every command.
+func csBinary() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "cs"
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if abs, err := filepath.Abs(exe); err == nil {
+		exe = abs
+	}
+	return exe
+}
+
 // startTurn fires one chat turn: builds fresh account context plus the command
 // catalog, launches claude in a goroutine that streams events onto m.sub, and
 // starts listening for them.
 func (m *Model) startTurn(prompt string) tea.Cmd {
-	sys := buildContext(m.st, m.chatCust.id) + "\n" + toolInstructions(m.chatCust.id)
+	bin := csBinary()
+	sys := buildContext(m.st, m.chatCust.id) + "\n" + toolInstructions(m.chatCust.id, bin)
 	sid := m.chatSID
 	sub := m.sub
 	repo := m.st.Dir
 	launch := func() tea.Msg {
-		runClaude(sub, sid, sys, prompt, repo)
+		runClaude(sub, sid, sys, prompt, repo, bin)
 		return nil
 	}
 	return tea.Batch(launch, listen(sub))
@@ -71,14 +92,15 @@ func listen(sub chan tea.Msg) tea.Cmd {
 }
 
 // runClaude invokes `claude -p` in headless streaming mode with the Bash tool
-// scoped to `cs` commands, and forwards assistant text, tool activity, and a
-// final done signal onto sub. The prompt goes via stdin because --allowedTools
-// is variadic and would otherwise swallow a positional prompt. CS_DIR is baked
-// into the child env so any cs command the model runs hits the same repo.
-func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir string) {
+// scoped to the absolute cs binary path, and forwards assistant text, tool
+// activity, and a final done signal onto sub. The prompt goes via stdin because
+// --allowedTools is variadic and would otherwise swallow a positional prompt.
+// CS_DIR is baked into the child env so any cs command the model runs hits the
+// same repo.
+func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 	go func() {
 		args := []string{"-p", "--output-format", "stream-json", "--verbose",
-			"--allowedTools", "Bash(cs:*)"}
+			"--allowedTools", "Bash(" + bin + ":*)"}
 		if sid != "" {
 			args = append(args, "--resume", sid)
 		}
@@ -174,13 +196,17 @@ func firstLine(s string) string {
 }
 
 // toolInstructions is the command catalog handed to the model: an explicit,
-// enforced list of what it may run, mirroring a tool-selection contract.
-func toolInstructions(custID string) string {
+// enforced list of what it may run, mirroring a tool-selection contract. bin is
+// the absolute cs binary path the Bash allowlist is scoped to; the model must
+// invoke exactly that path or the command is denied, so the catalog uses it.
+func toolInstructions(custID, bin string) string {
 	return "You can act on this account by running cs commands with the Bash tool. " +
-		"Only run `cs` commands. The data repo is preselected via CS_DIR, so never pass --repo. " +
+		"Only run the cs binary at " + bin + "; invoke it by that exact absolute path, not the bare name `cs`. " +
+		"The data repo is preselected via CS_DIR, so never pass --repo. " +
 		"Always pass --commit on changes so they persist to history. " +
 		"Target account for any action: " + custID + ". " +
-		"After acting, confirm briefly what you changed. Available commands:\n" +
+		"After acting, confirm briefly what you changed. In every command below, " +
+		"replace `cs` with " + bin + ":\n" +
 		"  cs note -c <id> -k call|slack|email|ticket|meeting|note \"<summary>\" --commit\n" +
 		"  cs item add -c <id> -t bug|feature|question|action -p <1-3> \"<title>\" --commit\n" +
 		"  cs item resolve <item-id> --commit\n" +

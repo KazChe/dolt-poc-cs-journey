@@ -80,6 +80,23 @@ func TestSplitDue(t *testing.T) {
 	}
 }
 
+func TestEffectiveDueBound(t *testing.T) {
+	today := todayDate()
+	// A past bound clamps up to today so overdue items are never filtered out.
+	if got := effectiveDueBound(today.AddDate(0, 0, -10)); !got.Equal(today) {
+		t.Fatalf("past bound = %v, want today %v", got, today)
+	}
+	// Today stays today.
+	if got := effectiveDueBound(today); !got.Equal(today) {
+		t.Fatalf("today bound = %v, want %v", got, today)
+	}
+	// A future bound is preserved.
+	future := today.AddDate(0, 0, 5)
+	if got := effectiveDueBound(future); !got.Equal(future) {
+		t.Fatalf("future bound = %v, want %v", got, future)
+	}
+}
+
 func TestDueQuietLine(t *testing.T) {
 	one := []map[string]any{{"due_at": day(0)}}
 	two := []map[string]any{{"due_at": day(0)}, {"due_at": day(1)}}

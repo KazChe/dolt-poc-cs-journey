@@ -30,6 +30,10 @@ var dueCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The effective bound never dips below today, so overdue items always
+		// surface even when --before is in the past. Use it for the header too,
+		// so the "Due by" label matches what was actually included.
+		before = effectiveDueBound(before)
 		rows, err := dueItems(st, before)
 		if err != nil {
 			return err
@@ -95,15 +99,25 @@ func dueDateStr(v any) string {
 	return ""
 }
 
+// effectiveDueBound clamps a window bound so it never dips below today: overdue
+// items (due before today) are always surfaced, even when --before is in the
+// past — otherwise the "overdue always appears" contract would break.
+func effectiveDueBound(before time.Time) time.Time {
+	if today := todayDate(); before.Before(today) {
+		return today
+	}
+	return before
+}
+
 // dueItems returns open items whose due_at is set and falls on or before the
-// window bound, OR is already overdue (overdue is always surfaced regardless of
-// the window). Ordered by date so the soonest work comes first.
-func dueItems(st *store.Store, before time.Time) ([]map[string]any, error) {
+// bound. Pass an effectiveDueBound so overdue items are never filtered out.
+// Ordered by date so the soonest work comes first.
+func dueItems(st *store.Store, bound time.Time) ([]map[string]any, error) {
 	return st.Query(fmt.Sprintf(
 		"SELECT id,customer_id,type,title,due_at FROM items "+
 			"WHERE status<>'resolved' AND due_at IS NOT NULL AND due_at<=%s "+
 			"ORDER BY due_at",
-		sqlStr(before.Format("2006-01-02"))))
+		sqlStr(bound.Format("2006-01-02"))))
 }
 
 // splitDue partitions due rows into overdue (before today) and upcoming (today

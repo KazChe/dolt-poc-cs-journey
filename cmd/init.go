@@ -37,10 +37,14 @@ var initCmd = &cobra.Command{
 // ensureColumn adds a column to a table only if it is not already present.
 // Dolt has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so we probe
 // information_schema first, making `cs init` a safe idempotent migration.
+// table/column/definition are SQL identifiers, not string literals, so they
+// cannot be sqlStr-quoted in the ALTER; callers must pass trusted, hardcoded
+// values (never user input). The probe is scoped to the current database so a
+// same-named column in another database can't mask a needed migration here.
 func ensureColumn(st *store.Store, table, column, definition string) error {
 	rows, err := st.Query(fmt.Sprintf(
 		"SELECT COUNT(*) AS n FROM information_schema.columns "+
-			"WHERE table_name=%s AND column_name=%s",
+			"WHERE table_schema=DATABASE() AND table_name=%s AND column_name=%s",
 		sqlStr(table), sqlStr(column)))
 	if err != nil {
 		return err

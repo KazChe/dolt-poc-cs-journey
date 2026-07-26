@@ -114,6 +114,7 @@ func listen(sub chan tea.Msg) tea.Cmd {
 func runClaude(ctx context.Context, sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 	go func() {
 		args := []string{"-p", "--output-format", "stream-json", "--verbose",
+			"--include-partial-messages",
 			"--allowedTools", "Bash(" + bin + ":*)"}
 		if sid != "" {
 			args = append(args, "--resume", sid)
@@ -147,8 +148,16 @@ func runClaude(ctx context.Context, sub chan tea.Msg, sid, sysPrompt, prompt, re
 				newSID = s
 			}
 			switch ev["type"] {
+			case "stream_event":
+				// Token-level streaming: forward each text delta as it arrives so
+				// text types out live instead of landing one block at a time.
+				if t := streamTextDelta(ev); t != "" {
+					sub <- chatTextMsg{t}
+				}
 			case "assistant":
-				for _, msg := range assistantBlocks(ev) {
+				// Text was already streamed via stream_event deltas above, so only
+				// forward tool-use notes here to avoid duplicating the text.
+				for _, msg := range assistantToolNotes(ev) {
 					sub <- msg
 				}
 			case "user":
@@ -162,20 +171,31 @@ func runClaude(ctx context.Context, sub chan tea.Msg, sid, sysPrompt, prompt, re
 	}()
 }
 
-// assistantBlocks turns one assistant event into ordered messages: text chunks
-// and a one-line note per Bash command the model invoked.
-func assistantBlocks(ev map[string]any) []tea.Msg {
+// streamTextDelta pulls the text out of a stream_event carrying a
+// content_block_delta of type text_delta, the token-level unit claude emits
+// under --include-partial-messages. Returns "" for any other stream event.
+func streamTextDelta(ev map[string]any) string {
+	se, _ := ev["event"].(map[string]any)
+	if str(se["type"]) != "content_block_delta" {
+		return ""
+	}
+	delta, _ := se["delta"].(map[string]any)
+	if str(delta["type"]) != "text_delta" {
+		return ""
+	}
+	return str(delta["text"])
+}
+
+// assistantToolNotes turns one assistant event into a one-line note per Bash
+// command the model invoked. Text blocks are ignored here because they are
+// streamed token-by-token via stream_event deltas.
+func assistantToolNotes(ev map[string]any) []tea.Msg {
 	msg, _ := ev["message"].(map[string]any)
 	content, _ := msg["content"].([]any)
 	var out []tea.Msg
 	for _, c := range content {
 		cm, _ := c.(map[string]any)
-		switch cm["type"] {
-		case "text":
-			if t := str(cm["text"]); t != "" {
-				out = append(out, chatTextMsg{t})
-			}
-		case "tool_use":
+		if cm["type"] == "tool_use" {
 			inp, _ := cm["input"].(map[string]any)
 			if cmdStr := str(inp["command"]); cmdStr != "" {
 				out = append(out, chatToolMsg{text: "⚙ " + cmdStr})

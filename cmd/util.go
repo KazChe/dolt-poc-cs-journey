@@ -82,6 +82,23 @@ func ageDays(v any) string {
 	return fmt.Sprintf("%dd", int(time.Since(t).Hours()/24))
 }
 
+// asInt coerces a value from a dolt JSON result into an int. Dolt returns
+// numeric columns as JSON numbers (float64), but tolerate a stringified form
+// too. Returns 0 for anything unparseable or null.
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case string:
+		var i int
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	}
+	return 0
+}
+
 // fmtDay renders a timestamp value as a calendar date, e.g. "2026-07-26".
 // Empty if the value is null or unparseable (e.g. an unresolved item's
 // resolved_at).

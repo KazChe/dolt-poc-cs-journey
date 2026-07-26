@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS items (
   external_ref VARCHAR(500),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   resolved_at TIMESTAMP NULL,
+  due_at DATE NULL,
   INDEX (customer_id, status)
 );
 

@@ -32,6 +32,15 @@ var noteCmd = &cobra.Command{
 
 		summary := strings.TrimSpace(strings.Join(args, " "))
 		if summary == "" {
+			// No summary on the command line: prompt for it, so `cs note` (or
+			// after the fuzzy picker) lets you type the note inline.
+			entered, err := promptLine(fmt.Sprintf("Note for %s: ", custID))
+			if err != nil {
+				return err
+			}
+			summary = strings.TrimSpace(entered)
+		}
+		if summary == "" {
 			return fmt.Errorf("a note summary is required")
 		}
 

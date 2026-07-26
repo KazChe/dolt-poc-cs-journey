@@ -1,14 +1,28 @@
 package cmd
 
 import (
+	"bufio"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/KazChe/cs/internal/store"
 	"github.com/KazChe/cs/internal/ui"
 )
+
+// promptLine prints label and reads a single line from stdin. A trailing EOF
+// with data (e.g. piped input without a newline) still returns that data.
+func promptLine(label string) (string, error) {
+	fmt.Print(label)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return line, nil
+}
 
 // sqlStr quotes and escapes a string literal for the Dolt CLI. This tool drives
 // dolt via string SQL, so at minimum single quotes are doubled. It is a local

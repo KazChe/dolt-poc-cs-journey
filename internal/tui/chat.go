@@ -352,7 +352,7 @@ func (m *Model) syncViewport() {
 func (m Model) chatView() string {
 	status := ""
 	if m.streaming {
-		status = "  · thinking…"
+		status = "  " + m.spinner.View() + " thinking…"
 	}
 	title := titleStyle.Render(fmt.Sprintf("Chat · %s (%s)%s", m.chatCust.name, m.chatCust.id, status))
 	foot := footerStyle.Render("enter send · esc back · ctrl+c quit")

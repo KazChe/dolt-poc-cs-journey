@@ -26,10 +26,28 @@ this code repo, so your notes never live in here.
 ```bash
 git clone https://github.com/KazChe/cs.git
 cd cs
-go build -o cs .
-# optionally put it on your PATH:
-# mv cs /usr/local/bin/
+make build          # compiles ./cs (same as: go build -o cs .)
+# put it on your PATH:
+make install        # installs to $(go env GOPATH)/bin/cs
+# or into a custom prefix:
+# make install PREFIX=~/.local   # -> ~/.local/bin/cs
 ```
+
+Run `make help` to see all targets (`build`, `install`, `test`, `vet`, `clean`).
+
+## Updating
+
+`cs` is a compiled binary, so pulling new code does **not** change the `cs`
+already on your PATH — you must rebuild. After a `git pull` (or checking out a
+branch), reinstall:
+
+```bash
+git pull
+make install        # rebuild and replace the cs on your PATH
+```
+
+If a newly added flag reports `unknown flag`, you're still running the old
+binary — `which cs` shows the file to replace, and `make install` overwrites it.
 
 ## Setup
 

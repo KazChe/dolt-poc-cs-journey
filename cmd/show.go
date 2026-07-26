@@ -31,7 +31,7 @@ var showCmd = &cobra.Command{
 
 		fmt.Println("\nOpen items (oldest first):")
 		items, err := st.Query(fmt.Sprintf(
-			"SELECT id,type,priority,title,created_at FROM items WHERE customer_id=%s AND status<>'resolved' ORDER BY created_at",
+			"SELECT id,type,priority,title,created_at,due_at FROM items WHERE customer_id=%s AND status<>'resolved' ORDER BY created_at",
 			sqlStr(cust)))
 		if err != nil {
 			return err
@@ -40,7 +40,11 @@ var showCmd = &cobra.Command{
 			fmt.Println("  (none)")
 		}
 		for _, r := range items {
-			fmt.Printf("  %-20v p%-2v %-8v %v  (%s old)\n", r["id"], r["priority"], r["type"], r["title"], ageDays(r["created_at"]))
+			meta := fmt.Sprintf("%s old", ageDays(r["created_at"]))
+			if due := dueAnnotation(r["due_at"]); due != "" {
+				meta += ", " + due
+			}
+			fmt.Printf("  %-20v p%-2v %-8v %v  (%s)\n", r["id"], r["priority"], r["type"], r["title"], meta)
 		}
 
 		fmt.Println("\nRecent activity:")

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,7 @@ var (
 	itemPriority int
 	itemRef      string
 	itemDesc     string
+	itemDue      string
 	itemCommit   bool
 	itemStatus   string
 	itemAll      bool
@@ -36,15 +38,23 @@ var itemAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		due, err := dueLiteral(itemDue)
+		if err != nil {
+			return err
+		}
 		title := strings.Join(args, " ")
 		id := newID("itm")
 		q := fmt.Sprintf(
-			"INSERT INTO items (id,customer_id,type,title,description,priority,external_ref) VALUES (%s,%s,%s,%s,%s,%d,%s)",
-			sqlStr(id), sqlStr(cust), sqlStr(itemType), sqlStr(title), sqlStr(itemDesc), itemPriority, sqlStr(itemRef))
+			"INSERT INTO items (id,customer_id,type,title,description,priority,external_ref,due_at) VALUES (%s,%s,%s,%s,%s,%d,%s,%s)",
+			sqlStr(id), sqlStr(cust), sqlStr(itemType), sqlStr(title), sqlStr(itemDesc), itemPriority, sqlStr(itemRef), due)
 		if err := st.Exec(q); err != nil {
 			return err
 		}
-		fmt.Printf("✓ %s [%s p%d] %s  (%s)\n", id, itemType, itemPriority, title, cust)
+		suffix := ""
+		if itemDue != "" {
+			suffix = "  due " + itemDue
+		}
+		fmt.Printf("✓ %s [%s p%d] %s  (%s)%s\n", id, itemType, itemPriority, title, cust, suffix)
 		return maybeCommit(st, itemCommit, fmt.Sprintf("item: %s %s (%s)", id, title, cust))
 	},
 }
@@ -73,6 +83,39 @@ var itemResolveCmd = &cobra.Command{
 	},
 }
 
+var itemDueCmd = &cobra.Command{
+	Use:   "due <id> [date]",
+	Short: "Set or clear an item's due date (YYYY-MM-DD; omit the date to clear)",
+	Long: "Set an item's target date, e.g. `cs item due itm-abc123 2026-08-15`.\n" +
+		"Omit the date (`cs item due itm-abc123`) to clear it.",
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		st := mustStore()
+		id := args[0]
+		var date string
+		if len(args) == 2 {
+			date = args[1]
+		}
+		due, err := dueLiteral(date)
+		if err != nil {
+			return err
+		}
+		if err := st.Exec(fmt.Sprintf("UPDATE items SET due_at=%s WHERE id=%s", due, sqlStr(id))); err != nil {
+			return err
+		}
+		if date == "" {
+			fmt.Printf("✓ cleared due date on %s\n", id)
+		} else {
+			fmt.Printf("✓ %s due %s\n", id, date)
+		}
+		msg := fmt.Sprintf("item: due %s cleared", id)
+		if date != "" {
+			msg = fmt.Sprintf("item: due %s %s", id, date)
+		}
+		return maybeCommit(st, itemCommit, msg)
+	},
+}
+
 var itemLsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List items (open by default; --all/--resolved/--status widen the view)",
@@ -94,7 +137,7 @@ var itemLsCmd = &cobra.Command{
 			}
 			where += "customer_id=" + sqlStr(itemCust)
 		}
-		query := "SELECT id,customer_id,type,priority,title,status,created_at,resolved_at FROM items"
+		query := "SELECT id,customer_id,type,priority,title,status,created_at,resolved_at,due_at FROM items"
 		if where != "" {
 			query += " WHERE " + where
 		}
@@ -114,11 +157,29 @@ var itemLsCmd = &cobra.Command{
 			if d := fmtDay(r["resolved_at"]); d != "" {
 				when = "resolved " + d
 			}
+			// Surface an open item's due date (overdue/upcoming). Resolved items
+			// omit it: the date no longer represents pending work.
+			if due := dueAnnotation(r["due_at"]); due != "" && fmtDay(r["resolved_at"]) == "" {
+				when += ", " + due
+			}
 			fmt.Printf("%-20v %-9v p%-2v %-8v %-9v %v  (%s)\n",
 				r["id"], r["customer_id"], r["priority"], r["type"], r["status"], r["title"], when)
 		}
 		return nil
 	},
+}
+
+// dueLiteral validates a YYYY-MM-DD date and returns it as a quoted SQL literal,
+// or the SQL keyword NULL when date is empty (meaning "no due date" / "clear").
+// A malformed date is rejected rather than silently stored.
+func dueLiteral(date string) (string, error) {
+	if date == "" {
+		return "NULL", nil
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", fmt.Errorf("invalid due date %q: use YYYY-MM-DD", date)
+	}
+	return sqlStr(date), nil
 }
 
 // itemStatusFilter builds the SQL status predicate for `item ls` from the
@@ -164,15 +225,18 @@ func init() {
 	itemAddCmd.Flags().IntVarP(&itemPriority, "priority", "p", 2, "priority (1 = highest)")
 	itemAddCmd.Flags().StringVar(&itemRef, "ref", "", "external link (jira/zendesk/etc.)")
 	itemAddCmd.Flags().StringVarP(&itemDesc, "desc", "d", "", "description")
+	itemAddCmd.Flags().StringVar(&itemDue, "due", "", "target date (YYYY-MM-DD)")
 	itemAddCmd.Flags().BoolVar(&itemCommit, "commit", false, "commit immediately")
 
 	itemResolveCmd.Flags().BoolVar(&itemCommit, "commit", false, "commit immediately")
+
+	itemDueCmd.Flags().BoolVar(&itemCommit, "commit", false, "commit immediately")
 
 	itemLsCmd.Flags().StringVarP(&itemCust, "cust", "c", "", "filter by customer id")
 	itemLsCmd.Flags().BoolVar(&itemAll, "all", false, "list items of every status, not just open")
 	itemLsCmd.Flags().BoolVar(&itemResolved, "resolved", false, "list only resolved items (shows the resolved date)")
 	itemLsCmd.Flags().StringVar(&itemStatus, "status", "", "filter to an exact status (e.g. open, resolved)")
 
-	itemCmd.AddCommand(itemAddCmd, itemResolveCmd, itemLsCmd)
+	itemCmd.AddCommand(itemAddCmd, itemResolveCmd, itemDueCmd, itemLsCmd)
 	rootCmd.AddCommand(itemCmd)
 }

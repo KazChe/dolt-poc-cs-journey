@@ -82,6 +82,66 @@ func ageDays(v any) string {
 	return fmt.Sprintf("%dd", int(time.Since(t).Hours()/24))
 }
 
+// parseDay parses a dolt DATE/TIMESTAMP value into a calendar date (a
+// midnight-UTC time.Time carrying only year/month/day), and reports whether it
+// was parseable and non-null. Normalizing to a pure date keeps comparisons at
+// day granularity and free of timezone-offset skew — never use Truncate here,
+// since it aligns to UTC midnight regardless of the value's location.
+func parseDay(v any) (time.Time, bool) {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04:05", time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return dateOnly(t), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// dateOnly strips the time-of-day, yielding midnight UTC on the same calendar
+// date. todayDate is the same normalization applied to the local current date.
+func dateOnly(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func todayDate() time.Time {
+	return dateOnly(time.Now())
+}
+
+// dueAnnotation renders an item's due_at as a compact status suffix relative to
+// today: "⚠ overdue <date>" when the date has passed, "due <date>" otherwise
+// (a date equal to today counts as due, not overdue). Empty for a null/unset
+// due date so callers can omit it entirely.
+func dueAnnotation(v any) string {
+	d, ok := parseDay(v)
+	if !ok {
+		return ""
+	}
+	if d.Before(todayDate()) {
+		return "⚠ overdue " + d.Format("2006-01-02")
+	}
+	return "due " + d.Format("2006-01-02")
+}
+
+// asInt coerces a value from a dolt JSON result into an int. Dolt returns
+// numeric columns as JSON numbers (float64), but tolerate a stringified form
+// too. Returns 0 for anything unparseable or null.
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case string:
+		var i int
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	}
+	return 0
+}
+
 // fmtDay renders a timestamp value as a calendar date, e.g. "2026-07-26".
 // Empty if the value is null or unparseable (e.g. an unresolved item's
 // resolved_at).

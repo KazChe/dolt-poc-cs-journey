@@ -13,6 +13,7 @@ import (
 var (
 	setupGlobal bool
 	setupRemove bool
+	setupRC     string
 )
 
 var setupCmd = &cobra.Command{
@@ -111,6 +112,155 @@ var setupClaudeCmd = &cobra.Command{
 		fmt.Println("  restart Claude Code for it to take effect.")
 		return nil
 	},
+}
+
+var setupShellCmd = &cobra.Command{
+	Use:   "shell",
+	Short: "Add a quiet due-check to your shell startup file (CLI-side session start)",
+	Long: "Appends a small block to your shell rc (~/.zshrc by default) that runs\n" +
+		"`cs due --quiet` when a new terminal opens. It prints one compact line when\n" +
+		"something is overdue or due soon, and nothing at all otherwise — the CLI\n" +
+		"equivalent of the Claude Code SessionStart hook. Re-run after moving the\n" +
+		"binary or repo; use --remove to take it out. --rc <path> targets a specific\n" +
+		"file (e.g. ~/.bashrc).",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		rcPath, err := shellRCPath(setupRC)
+		if err != nil {
+			return err
+		}
+
+		if setupRemove {
+			changed, err := removeShellSnippet(rcPath)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				fmt.Printf("✓ nothing to remove in %s\n", rcPath)
+				return nil
+			}
+			fmt.Printf("✓ removed cs due snippet from %s\n", rcPath)
+			return nil
+		}
+
+		snippet, err := shellSnippet()
+		if err != nil {
+			return err
+		}
+		changed, err := addShellSnippet(rcPath, snippet)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			fmt.Printf("✓ cs due snippet already present in %s\n", rcPath)
+			return nil
+		}
+		fmt.Printf("✓ added cs due snippet to %s\n", rcPath)
+		fmt.Println("  open a new terminal (or source the file) for it to take effect.")
+		return nil
+	},
+}
+
+// shellSnippetStart / shellSnippetEnd fence the block cs manages in the rc, so
+// setup can add or remove exactly it without disturbing the rest of the file.
+const (
+	shellSnippetStart = "# cs:due:start"
+	shellSnippetEnd   = "# cs:due:end"
+)
+
+// shellRCPath resolves the rc file to edit: an explicit --rc path, else
+// ~/.zshrc (the macOS default login shell).
+func shellRCPath(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".zshrc"), nil
+}
+
+// shellSnippet builds the fenced rc block that runs the quiet due check, baking
+// in absolute paths to this binary and the resolved repo so it fires from any
+// directory a new shell starts in.
+func shellSnippet() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(exe); err == nil {
+		exe = abs
+	}
+	cmd := shellQuote(exe) + " due --quiet"
+	if repo := resolveRepoDir(); repo != "" {
+		if abs, err := filepath.Abs(repo); err == nil {
+			repo = abs
+		}
+		cmd += " --repo " + shellQuote(repo)
+	}
+	// Startup code must never be noisy. Guard on the binary existing (so a stale
+	// rc line after a move/uninstall is a no-op, not "command not found"), and
+	// swallow stderr plus any non-zero exit (`|| true`) so a transient failure —
+	// dolt missing from PATH, an unreadable repo — fails silent rather than
+	// dumping an error into every new terminal.
+	return fmt.Sprintf("%s\n[ -x %s ] && { %s ; } 2>/dev/null || true\n%s\n",
+		shellSnippetStart, shellQuote(exe), cmd, shellSnippetEnd), nil
+}
+
+// addShellSnippet appends the snippet to the rc file unless an equivalent block
+// is already present. Returns false when nothing changed.
+func addShellSnippet(path, snippet string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	existing := string(data)
+	if strings.Contains(existing, shellSnippetStart) {
+		return false, nil
+	}
+	var b strings.Builder
+	if len(strings.TrimSpace(existing)) > 0 {
+		b.WriteString(strings.TrimRight(existing, "\n"))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(snippet)
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// removeShellSnippet strips the fenced cs due block from the rc file. Returns
+// false when no block was present.
+func removeShellSnippet(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	existing := string(data)
+	start := strings.Index(existing, shellSnippetStart)
+	if start < 0 {
+		return false, nil
+	}
+	end := strings.Index(existing, shellSnippetEnd)
+	if end < 0 {
+		return false, nil
+	}
+	end += len(shellSnippetEnd)
+	remaining := strings.TrimSpace(existing[:start] + existing[end:])
+	if remaining == "" {
+		if err := os.Remove(path); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := os.WriteFile(path, []byte(remaining+"\n"), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // pointerBlock is the CLAUDE.md section telling agents to use cs read commands
@@ -352,6 +502,10 @@ func removeHook(hooks map[string]any, event, command string) {
 func init() {
 	setupClaudeCmd.Flags().BoolVar(&setupGlobal, "global", false, "write to ~/.claude/settings.json instead of ./.claude/settings.json")
 	setupClaudeCmd.Flags().BoolVar(&setupRemove, "remove", false, "remove the hook instead of installing it")
-	setupCmd.AddCommand(setupClaudeCmd)
+
+	setupShellCmd.Flags().StringVar(&setupRC, "rc", "", "shell rc file to edit (default ~/.zshrc)")
+	setupShellCmd.Flags().BoolVar(&setupRemove, "remove", false, "remove the snippet instead of installing it")
+
+	setupCmd.AddCommand(setupClaudeCmd, setupShellCmd)
 	rootCmd.AddCommand(setupCmd)
 }

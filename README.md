@@ -137,6 +137,13 @@ The absolute paths to the `cs` binary and the resolved Dolt repo are baked into
 the hook command, so it fires correctly no matter which project directory Claude
 Code opens in. Re-run the command after moving the binary or the data repo.
 
+Alongside the hook, the project install (without `--global`) also adds a short
+account-depth pointer to the project's `CLAUDE.md`, telling agents to reach for
+`cs show <id>` / `cs week <id>` / `cs item ls -c <id>` when they need detail on a
+specific account, rather than external sources like Gmail or Drive. The pointer
+is a fenced block, so it is appended without touching the rest of your
+`CLAUDE.md`, and `--remove` strips just that block.
+
 ## Configuration
 
 - `--repo <path>` or the `CS_DIR` environment variable selects the Dolt data

@@ -210,7 +210,7 @@ func toolInstructions(custID, bin string) string {
 		"  cs note -c <id> -k call|slack|email|ticket|meeting|note \"<summary>\" --commit\n" +
 		"  cs item add -c <id> -t bug|feature|question|action -p <1-3> \"<title>\" --commit\n" +
 		"  cs item resolve <item-id> --commit\n" +
-		"  cs item ls -c <id>\n" +
+		"  cs item ls -c <id>                 (open items; add --resolved for resolved items with their resolved date, or --all for every status)\n" +
 		"  cs stage <id> <to-stage> --reason \"<why>\" --commit\n" +
 		"  cs link <from-item> <to-item> --rel blocks|relates|raised_in|advances_stage|supersedes --commit\n" +
 		"  cs show <id>\n" +

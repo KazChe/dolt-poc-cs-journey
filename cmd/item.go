@@ -16,6 +16,9 @@ var (
 	itemRef      string
 	itemDesc     string
 	itemCommit   bool
+	itemStatus   string
+	itemAll      bool
+	itemResolved bool
 )
 
 var itemCmd = &cobra.Command{
@@ -72,28 +75,87 @@ var itemResolveCmd = &cobra.Command{
 
 var itemLsCmd = &cobra.Command{
 	Use:   "ls",
-	Short: "List open items (optionally for one customer)",
+	Short: "List items (open by default; --all/--resolved/--status widen the view)",
+	Long: "List items for one customer (or all). By default only open items are\n" +
+		"shown. Use --resolved to see only resolved items, --all for every status,\n" +
+		"or --status <value> to filter to an exact status. Resolved items also show\n" +
+		"the date they were resolved.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		st := mustStore()
-		where := "status <> 'resolved'"
-		if itemCust != "" {
-			where += " AND customer_id=" + sqlStr(itemCust)
+
+		statusWhere, err := itemStatusFilter()
+		if err != nil {
+			return err
 		}
-		rows, err := st.Query(
-			"SELECT id,customer_id,type,priority,title,created_at FROM items WHERE " + where + " ORDER BY created_at")
+		where := statusWhere
+		if itemCust != "" {
+			if where != "" {
+				where += " AND "
+			}
+			where += "customer_id=" + sqlStr(itemCust)
+		}
+		query := "SELECT id,customer_id,type,priority,title,status,created_at,resolved_at FROM items"
+		if where != "" {
+			query += " WHERE " + where
+		}
+		query += " ORDER BY created_at"
+
+		rows, err := st.Query(query)
 		if err != nil {
 			return err
 		}
 		if len(rows) == 0 {
-			fmt.Println("(no open items)")
+			fmt.Println(itemLsEmptyMsg())
 			return nil
 		}
 		for _, r := range rows {
-			fmt.Printf("%-20v %-9v p%-2v %-8v %v  (%s)\n",
-				r["id"], r["customer_id"], r["priority"], r["type"], r["title"], ageDays(r["created_at"]))
+			// Open items show age; resolved items show the resolution date.
+			when := "created " + ageDays(r["created_at"]) + " ago"
+			if d := fmtDay(r["resolved_at"]); d != "" {
+				when = "resolved " + d
+			}
+			fmt.Printf("%-20v %-9v p%-2v %-8v %-9v %v  (%s)\n",
+				r["id"], r["customer_id"], r["priority"], r["type"], r["status"], r["title"], when)
 		}
 		return nil
 	},
+}
+
+// itemStatusFilter builds the SQL status predicate for `item ls` from the
+// --status/--resolved/--all flags. Precedence: --status (exact) > --resolved >
+// --all > default (open only, i.e. anything not resolved). Returns "" when no
+// status predicate should be applied (--all).
+func itemStatusFilter() (string, error) {
+	switch {
+	case itemStatus != "":
+		if itemAll || itemResolved {
+			return "", fmt.Errorf("--status cannot be combined with --all or --resolved")
+		}
+		return "status=" + sqlStr(itemStatus), nil
+	case itemResolved:
+		if itemAll {
+			return "", fmt.Errorf("--resolved cannot be combined with --all")
+		}
+		return "status='resolved'", nil
+	case itemAll:
+		return "", nil
+	default:
+		return "status <> 'resolved'", nil
+	}
+}
+
+// itemLsEmptyMsg describes the empty result in terms of the active filter.
+func itemLsEmptyMsg() string {
+	switch {
+	case itemStatus != "":
+		return fmt.Sprintf("(no items with status %q)", itemStatus)
+	case itemResolved:
+		return "(no resolved items)"
+	case itemAll:
+		return "(no items)"
+	default:
+		return "(no open items)"
+	}
 }
 
 func init() {
@@ -107,6 +169,9 @@ func init() {
 	itemResolveCmd.Flags().BoolVar(&itemCommit, "commit", false, "commit immediately")
 
 	itemLsCmd.Flags().StringVarP(&itemCust, "cust", "c", "", "filter by customer id")
+	itemLsCmd.Flags().BoolVar(&itemAll, "all", false, "list items of every status, not just open")
+	itemLsCmd.Flags().BoolVar(&itemResolved, "resolved", false, "list only resolved items (shows the resolved date)")
+	itemLsCmd.Flags().StringVar(&itemStatus, "status", "", "filter to an exact status (e.g. open, resolved)")
 
 	itemCmd.AddCommand(itemAddCmd, itemResolveCmd, itemLsCmd)
 	rootCmd.AddCommand(itemCmd)

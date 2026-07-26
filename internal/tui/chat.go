@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,18 +74,31 @@ func csBinary() string {
 
 // startTurn fires one chat turn: builds fresh account context plus the command
 // catalog, launches claude in a goroutine that streams events onto m.sub, and
-// starts listening for them.
+// starts listening for them. The turn runs under a cancelable context whose
+// cancel func is stored on the model so esc (or a new turn) can kill the
+// subprocess instead of leaving it draining into m.sub.
 func (m *Model) startTurn(prompt string) tea.Cmd {
 	bin := csBinary()
 	sys := buildContext(m.st, m.chatCust.id) + "\n" + toolInstructions(m.chatCust.id, bin)
 	sid := m.chatSID
 	sub := m.sub
 	repo := m.st.Dir
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	launch := func() tea.Msg {
-		runClaude(sub, sid, sys, prompt, repo, bin)
+		runClaude(ctx, sub, sid, sys, prompt, repo, bin)
 		return nil
 	}
 	return tea.Batch(launch, listen(sub))
+}
+
+// cancelTurn kills the in-flight claude subprocess (if any) and clears the
+// cancel func. Safe to call when no turn is running.
+func (m *Model) cancelTurn() {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
 }
 
 func listen(sub chan tea.Msg) tea.Cmd {
@@ -97,7 +111,7 @@ func listen(sub chan tea.Msg) tea.Cmd {
 // --allowedTools is variadic and would otherwise swallow a positional prompt.
 // CS_DIR is baked into the child env so any cs command the model runs hits the
 // same repo.
-func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
+func runClaude(ctx context.Context, sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 	go func() {
 		args := []string{"-p", "--output-format", "stream-json", "--verbose",
 			"--allowedTools", "Bash(" + bin + ":*)"}
@@ -108,7 +122,7 @@ func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 			args = append(args, "--append-system-prompt", sysPrompt)
 		}
 
-		cmd := exec.Command("claude", args...)
+		cmd := exec.CommandContext(ctx, "claude", args...)
 		cmd.Stdin = strings.NewReader(prompt)
 		cmd.Env = append(os.Environ(), "CS_DIR="+repoDir)
 		stdout, err := cmd.StdoutPipe()

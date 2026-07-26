@@ -6,6 +6,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -91,6 +92,7 @@ type Model struct {
 	chatCur   string
 	streaming bool
 	sub       chan tea.Msg
+	cancel    context.CancelFunc
 }
 
 func New(st *store.Store) Model {
@@ -158,6 +160,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			switch msg.String() {
 			case "esc":
+				// Kill any in-flight turn so its claude subprocess doesn't keep
+				// running and draining into m.sub after we leave the pane.
+				m.cancelTurn()
+				m.streaming = false
 				m.mode = modeBoard
 				m.input.Blur()
 				return m, nil
@@ -165,6 +171,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.streaming {
 					p := strings.TrimSpace(m.input.Value())
 					if p != "" {
+						m.cancelTurn()
 						m.chatLog = append(m.chatLog, "you: "+p)
 						m.input.Reset()
 						m.streaming = true
@@ -244,6 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listen(m.sub)
 	case chatDoneMsg:
 		m.streaming = false
+		m.cancel = nil
 		if msg.err != nil {
 			m.chatLog = append(m.chatLog, "error: "+msg.err.Error())
 		} else if strings.TrimSpace(m.chatCur) != "" {

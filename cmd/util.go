@@ -81,3 +81,20 @@ func ageDays(v any) string {
 	}
 	return fmt.Sprintf("%dd", int(time.Since(t).Hours()/24))
 }
+
+// fmtDay renders a timestamp value as a calendar date, e.g. "2026-07-26".
+// Empty if the value is null or unparseable (e.g. an unresolved item's
+// resolved_at).
+func fmtDay(v any) string {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return ""
+	}
+	t, err := time.Parse("2006-01-02 15:04:05", s)
+	if err != nil {
+		if t, err = time.Parse(time.RFC3339, s); err != nil {
+			return ""
+		}
+	}
+	return t.Format("2006-01-02")
+}

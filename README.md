@@ -80,6 +80,11 @@ cs item ls -c acme
 # Update the item: resolve it once the fix ships.
 cs item resolve itm-jt4rb3 --commit     # or run `cs item resolve` to fuzzy-pick
 
+# Look back at resolved items (each shows the date it was resolved).
+cs item ls -c acme --resolved
+cs item ls -c acme --all                # every status, open and resolved
+cs item ls -c acme --status resolved    # or filter to an exact status
+
 # Read the whole trajectory back: state, open items, recent activity, stages.
 cs show acme
 

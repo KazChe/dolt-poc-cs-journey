@@ -137,7 +137,7 @@ var itemLsCmd = &cobra.Command{
 			}
 			where += "customer_id=" + sqlStr(itemCust)
 		}
-		query := "SELECT id,customer_id,type,priority,title,status,created_at,resolved_at FROM items"
+		query := "SELECT id,customer_id,type,priority,title,status,created_at,resolved_at,due_at FROM items"
 		if where != "" {
 			query += " WHERE " + where
 		}
@@ -156,6 +156,11 @@ var itemLsCmd = &cobra.Command{
 			when := "created " + ageDays(r["created_at"]) + " ago"
 			if d := fmtDay(r["resolved_at"]); d != "" {
 				when = "resolved " + d
+			}
+			// Surface an open item's due date (overdue/upcoming). Resolved items
+			// omit it: the date no longer represents pending work.
+			if due := dueAnnotation(r["due_at"]); due != "" && fmtDay(r["resolved_at"]) == "" {
+				when += ", " + due
 			}
 			fmt.Printf("%-20v %-9v p%-2v %-8v %-9v %v  (%s)\n",
 				r["id"], r["customer_id"], r["priority"], r["type"], r["status"], r["title"], when)

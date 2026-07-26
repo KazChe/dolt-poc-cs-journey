@@ -82,6 +82,36 @@ func ageDays(v any) string {
 	return fmt.Sprintf("%dd", int(time.Since(t).Hours()/24))
 }
 
+// parseDay parses a dolt DATE/TIMESTAMP value into a time.Time truncated to the
+// calendar day, and reports whether it was parseable and non-null.
+func parseDay(v any) (time.Time, bool) {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04:05", time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Truncate(24 * time.Hour), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// dueAnnotation renders an item's due_at as a compact status suffix relative to
+// today: "⚠ overdue <date>" when the date has passed, "due <date>" otherwise.
+// Empty for a null/unset due date so callers can omit it entirely.
+func dueAnnotation(v any) string {
+	d, ok := parseDay(v)
+	if !ok {
+		return ""
+	}
+	today := time.Now().Truncate(24 * time.Hour)
+	if d.Before(today) {
+		return "⚠ overdue " + d.Format("2006-01-02")
+	}
+	return "due " + d.Format("2006-01-02")
+}
+
 // asInt coerces a value from a dolt JSON result into an int. Dolt returns
 // numeric columns as JSON numbers (float64), but tolerate a stringified form
 // too. Returns 0 for anything unparseable or null.

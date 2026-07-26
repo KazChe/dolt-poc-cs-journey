@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,18 +74,31 @@ func csBinary() string {
 
 // startTurn fires one chat turn: builds fresh account context plus the command
 // catalog, launches claude in a goroutine that streams events onto m.sub, and
-// starts listening for them.
+// starts listening for them. The turn runs under a cancelable context whose
+// cancel func is stored on the model so esc (or a new turn) can kill the
+// subprocess instead of leaving it draining into m.sub.
 func (m *Model) startTurn(prompt string) tea.Cmd {
 	bin := csBinary()
 	sys := buildContext(m.st, m.chatCust.id) + "\n" + toolInstructions(m.chatCust.id, bin)
 	sid := m.chatSID
 	sub := m.sub
 	repo := m.st.Dir
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	launch := func() tea.Msg {
-		runClaude(sub, sid, sys, prompt, repo, bin)
+		runClaude(ctx, sub, sid, sys, prompt, repo, bin)
 		return nil
 	}
 	return tea.Batch(launch, listen(sub))
+}
+
+// cancelTurn kills the in-flight claude subprocess (if any) and clears the
+// cancel func. Safe to call when no turn is running.
+func (m *Model) cancelTurn() {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
 }
 
 func listen(sub chan tea.Msg) tea.Cmd {
@@ -97,9 +111,10 @@ func listen(sub chan tea.Msg) tea.Cmd {
 // --allowedTools is variadic and would otherwise swallow a positional prompt.
 // CS_DIR is baked into the child env so any cs command the model runs hits the
 // same repo.
-func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
+func runClaude(ctx context.Context, sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 	go func() {
 		args := []string{"-p", "--output-format", "stream-json", "--verbose",
+			"--include-partial-messages",
 			"--allowedTools", "Bash(" + bin + ":*)"}
 		if sid != "" {
 			args = append(args, "--resume", sid)
@@ -108,7 +123,7 @@ func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 			args = append(args, "--append-system-prompt", sysPrompt)
 		}
 
-		cmd := exec.Command("claude", args...)
+		cmd := exec.CommandContext(ctx, "claude", args...)
 		cmd.Stdin = strings.NewReader(prompt)
 		cmd.Env = append(os.Environ(), "CS_DIR="+repoDir)
 		stdout, err := cmd.StdoutPipe()
@@ -133,8 +148,16 @@ func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 				newSID = s
 			}
 			switch ev["type"] {
+			case "stream_event":
+				// Token-level streaming: forward each text delta as it arrives so
+				// text types out live instead of landing one block at a time.
+				if t := streamTextDelta(ev); t != "" {
+					sub <- chatTextMsg{t}
+				}
 			case "assistant":
-				for _, msg := range assistantBlocks(ev) {
+				// Text was already streamed via stream_event deltas above, so only
+				// forward tool-use notes here to avoid duplicating the text.
+				for _, msg := range assistantToolNotes(ev) {
 					sub <- msg
 				}
 			case "user":
@@ -148,20 +171,31 @@ func runClaude(sub chan tea.Msg, sid, sysPrompt, prompt, repoDir, bin string) {
 	}()
 }
 
-// assistantBlocks turns one assistant event into ordered messages: text chunks
-// and a one-line note per Bash command the model invoked.
-func assistantBlocks(ev map[string]any) []tea.Msg {
+// streamTextDelta pulls the text out of a stream_event carrying a
+// content_block_delta of type text_delta, the token-level unit claude emits
+// under --include-partial-messages. Returns "" for any other stream event.
+func streamTextDelta(ev map[string]any) string {
+	se, _ := ev["event"].(map[string]any)
+	if str(se["type"]) != "content_block_delta" {
+		return ""
+	}
+	delta, _ := se["delta"].(map[string]any)
+	if str(delta["type"]) != "text_delta" {
+		return ""
+	}
+	return str(delta["text"])
+}
+
+// assistantToolNotes turns one assistant event into a one-line note per Bash
+// command the model invoked. Text blocks are ignored here because they are
+// streamed token-by-token via stream_event deltas.
+func assistantToolNotes(ev map[string]any) []tea.Msg {
 	msg, _ := ev["message"].(map[string]any)
 	content, _ := msg["content"].([]any)
 	var out []tea.Msg
 	for _, c := range content {
 		cm, _ := c.(map[string]any)
-		switch cm["type"] {
-		case "text":
-			if t := str(cm["text"]); t != "" {
-				out = append(out, chatTextMsg{t})
-			}
-		case "tool_use":
+		if cm["type"] == "tool_use" {
 			inp, _ := cm["input"].(map[string]any)
 			if cmdStr := str(inp["command"]); cmdStr != "" {
 				out = append(out, chatToolMsg{text: "⚙ " + cmdStr})
@@ -318,7 +352,7 @@ func (m *Model) syncViewport() {
 func (m Model) chatView() string {
 	status := ""
 	if m.streaming {
-		status = "  · thinking…"
+		status = "  " + m.spinner.View() + " thinking…"
 	}
 	title := titleStyle.Render(fmt.Sprintf("Chat · %s (%s)%s", m.chatCust.name, m.chatCust.id, status))
 	foot := footerStyle.Render("enter send · esc back · ctrl+c quit")

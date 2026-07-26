@@ -70,7 +70,7 @@ var dueCmd = &cobra.Command{
 // defaultDueWindow is the upper bound for "due soon" when --before is unset:
 // 7 days from today, at day granularity.
 func defaultDueWindow() time.Time {
-	return time.Now().Truncate(24 * time.Hour).AddDate(0, 0, 7)
+	return todayDate().AddDate(0, 0, 7)
 }
 
 // dueWindow resolves the upper bound for "due soon". Empty means the default
@@ -84,7 +84,7 @@ func dueWindow(before string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid --before date %q: use YYYY-MM-DD", before)
 	}
-	return t.Truncate(24 * time.Hour), nil
+	return dateOnly(t), nil
 }
 
 // dueDateStr formats a due_at value as YYYY-MM-DD, or "" if null/unparseable.
@@ -109,7 +109,7 @@ func dueItems(st *store.Store, before time.Time) ([]map[string]any, error) {
 // splitDue partitions due rows into overdue (before today) and upcoming (today
 // or later), preserving the incoming date order within each group.
 func splitDue(rows []map[string]any) (overdue, upcoming []map[string]any) {
-	today := time.Now().Truncate(24 * time.Hour)
+	today := todayDate()
 	for _, r := range rows {
 		d, ok := parseDay(r["due_at"])
 		if !ok {

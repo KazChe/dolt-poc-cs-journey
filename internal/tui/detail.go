@@ -26,6 +26,36 @@ const (
 // mirrors laneOrder so the TUI accepts the same stage names the board shows.
 var knownStages = laneOrder
 
+// itemTypes / itemPriorities are the fixed enums the add form cycles through,
+// matching `cs item add`'s accepted values (type default "action", priority 2).
+var (
+	itemTypes      = []string{"bug", "feature", "question", "action"}
+	itemPriorities = []int{1, 2, 3}
+)
+
+// addStep walks the 'a' add-item form: pick a type, pick a priority, type the
+// title, then an optional due date. The type/priority steps are selectors
+// (←/→ or the listed keys); the title/due steps use detailInput.
+type addStep int
+
+const (
+	stepType addStep = iota
+	stepPriority
+	stepTitle
+	stepDue
+)
+
+// addForm holds the in-progress state of the add-item form. typeIdx/prioIdx
+// index into itemTypes/itemPriorities; title/due are captured via detailInput
+// as their steps become active.
+type addForm struct {
+	step    addStep
+	typeIdx int
+	prioIdx int // defaults to index of priority 2 (see beginAddForm)
+	title   string
+	due     string
+}
+
 // idAlphabet + newID mirror the CLI's id generation (cmd/util.go) so ids created
 // from the TUI look the same as ids created from `cs`.
 const idAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -219,8 +249,7 @@ func editPrompt(k editKind, m Model) string {
 			id = str(it["id"])
 		}
 		return "due for " + id + " (YYYY-MM-DD, empty clears)"
-	case editAdd:
-		return "new item title"
+	// editAdd has its own multi-step footer (addFormFoot), not a single prompt.
 	case editNote:
 		return "note"
 	case editStage:
@@ -231,10 +260,14 @@ func editPrompt(k editKind, m Model) string {
 
 // beginEdit opens the inline input for the given action. Actions that operate on
 // the selected item (due) require a selection; add/note/stage act on the account
-// and don't.
+// and don't. editAdd starts the multi-step form (beginAddForm) rather than a
+// single input.
 func (m Model) beginEdit(k editKind) (tea.Model, tea.Cmd) {
 	if k == editDue && m.selectedItem() == nil {
 		return m, nil
+	}
+	if k == editAdd {
+		return m.beginAddForm()
 	}
 	m.editKind = k
 	m.detailStatus = ""
@@ -253,9 +286,24 @@ func (m Model) beginEdit(k editKind) (tea.Model, tea.Cmd) {
 	return m, textinputBlink
 }
 
+// beginAddForm starts the add-item form on its first step (type selector), with
+// priority defaulting to 2 to match `cs item add`.
+func (m Model) beginAddForm() (tea.Model, tea.Cmd) {
+	m.editKind = editAdd
+	m.detailStatus = ""
+	m.addForm = addForm{step: stepType, typeIdx: 3, prioIdx: 1} // type=action, priority=2
+	m.detailInput.SetValue("")
+	m.detailInput.Blur() // selector steps don't use the text input
+	return m, nil
+}
+
 // updateActionInput captures keystrokes while any inline action input is open.
-// Enter applies the action, esc cancels.
+// The add form (editAdd) has its own multi-step handler; the other actions are
+// single-input: enter applies, esc cancels.
 func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.editKind == editAdd {
+		return m.updateAddForm(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.editKind = editNone
@@ -268,6 +316,110 @@ func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.detailInput, cmd = m.detailInput.Update(msg)
 	return m, cmd
+}
+
+// updateAddForm drives the add-item form's steps. esc cancels the whole form
+// from any step. Type/priority steps are selectors (←/→ or the number/letter
+// keys); title/due steps use detailInput. Enter advances, and on the final step
+// (due) commits.
+func (m Model) updateAddForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.editKind = editNone
+		m.detailInput.Blur()
+		m.syncDetail()
+		return m, nil
+	}
+	switch m.addForm.step {
+	case stepType:
+		switch msg.String() {
+		case "left", "h":
+			m.addForm.typeIdx = (m.addForm.typeIdx + len(itemTypes) - 1) % len(itemTypes)
+		case "right", "l", "tab":
+			m.addForm.typeIdx = (m.addForm.typeIdx + 1) % len(itemTypes)
+		case "enter":
+			m.addForm.step = stepPriority
+		}
+		return m, nil
+	case stepPriority:
+		switch msg.String() {
+		case "left", "h":
+			m.addForm.prioIdx = (m.addForm.prioIdx + len(itemPriorities) - 1) % len(itemPriorities)
+		case "right", "l", "tab":
+			m.addForm.prioIdx = (m.addForm.prioIdx + 1) % len(itemPriorities)
+		case "1", "2", "3":
+			m.addForm.prioIdx = int(msg.String()[0] - '1')
+		case "enter":
+			m.addForm.step = stepTitle
+			m.detailInput.SetValue("")
+			m.detailInput.CharLimit = 255
+			m.detailInput.Placeholder = ""
+			m.detailInput.Focus()
+			return m, textinputBlink
+		}
+		return m, nil
+	case stepTitle:
+		if msg.String() == "enter" {
+			title := strings.TrimSpace(m.detailInput.Value())
+			if title == "" {
+				m.detailStatus = "✗ a title is required"
+				m.syncDetail()
+				return m, nil
+			}
+			m.addForm.title = title
+			m.detailStatus = ""
+			m.addForm.step = stepDue
+			m.detailInput.SetValue("")
+			m.detailInput.CharLimit = 10
+			m.detailInput.Placeholder = "YYYY-MM-DD (optional)"
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.detailInput, cmd = m.detailInput.Update(msg)
+		return m, cmd
+	case stepDue:
+		if msg.String() == "enter" {
+			return m.commitAddForm()
+		}
+		var cmd tea.Cmd
+		m.detailInput, cmd = m.detailInput.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+// commitAddForm validates the optional due date, inserts the item with the
+// chosen type/priority/title/due, commits, and reloads. A bad due date keeps the
+// form on the due step so the user can fix it.
+func (m Model) commitAddForm() (tea.Model, tea.Cmd) {
+	f := m.addForm
+	itemType := itemTypes[f.typeIdx]
+	prio := itemPriorities[f.prioIdx]
+	due := strings.TrimSpace(m.detailInput.Value())
+	dueLit, err := dueSQLLiteral(due)
+	if err != nil {
+		m.detailStatus = "✗ " + err.Error()
+		m.syncDetail()
+		return m, nil
+	}
+
+	m.editKind = editNone
+	m.detailInput.Blur()
+
+	id := newID("itm")
+	query := fmt.Sprintf(
+		"INSERT INTO items (id,customer_id,type,title,priority,status,due_at) VALUES (%s,%s,%s,%s,%d,'open',%s)",
+		q(id), q(m.detail.c.id), q(itemType), q(f.title), prio, dueLit)
+	if err := m.st.Exec(query); err != nil {
+		m.detailStatus = "✗ add failed: " + err.Error()
+		m.syncDetail()
+		return m, nil
+	}
+	if err := m.st.Commit("item: " + id + " " + f.title + " (" + m.detail.c.id + ")"); err != nil {
+		m.detailStatus = "✗ commit failed: " + err.Error()
+		return m, loadDetail(m.st, m.detail.c)
+	}
+	m.detailStatus = fmt.Sprintf("✓ added %s [%s p%d]", id, itemType, prio)
+	return m, loadDetail(m.st, m.detail.c)
 }
 
 // commitAction validates the input for the active editKind, runs the write +
@@ -301,21 +453,8 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 		} else {
 			commitMsg, okStatus = "item: due "+id+" "+val, "✓ "+id+" due "+val
 		}
-	case editAdd:
-		if val == "" {
-			m.detailStatus = "✗ a title is required"
-			m.syncDetail()
-			return m, nil
-		}
-		id := newID("itm")
-		// Quick-add with `cs item add`'s flag defaults (type=action, priority=2);
-		// created_at/status fall to their schema defaults. Choosing a different
-		// type or priority is still a CLI job — the TUI keeps add to one keystroke.
-		query = fmt.Sprintf(
-			"INSERT INTO items (id,customer_id,type,title,priority,status) VALUES (%s,%s,'action',%s,2,'open')",
-			q(id), q(m.detail.c.id), q(val))
-		commitMsg = "item: " + id + " " + val + " (" + m.detail.c.id + ")"
-		okStatus = "✓ added " + id
+	// editAdd is handled by the multi-step add form (updateAddForm/commitAddForm),
+	// not here.
 	case editNote:
 		if val == "" {
 			m.detailStatus = "✗ a note is required"
@@ -546,10 +685,12 @@ func (m Model) detailView() string {
 		body = m.detailBody()
 	}
 
-	// Bottom line: the active action's prompt while editing, else the last
-	// action's status, else the key hints.
+	// Bottom line: the add form's current step, else the active action's prompt,
+	// else the last action's status, else the key hints.
 	var foot string
 	switch {
+	case m.editKind == editAdd:
+		foot = m.addFormFoot()
 	case m.editKind != editNone:
 		foot = detailPromptStyle.Render(editPrompt(m.editKind, m)+": ") + m.detailInput.View() +
 			footerStyle.Render("   enter save · esc cancel")
@@ -560,4 +701,62 @@ func (m Model) detailView() string {
 		foot = footerStyle.Render("tab pane · ↑/↓ select · r resolve · d due · a add · n note · s stage · esc back")
 	}
 	return header + "\n" + body + "\n" + foot + "\n"
+}
+
+// addFormFoot renders the add-item form's current step in the footer: the
+// type/priority steps show the enum options with the current choice highlighted;
+// the title/due steps show the text input. A validation error (m.detailStatus)
+// is prepended so the user sees why the step didn't advance.
+func (m Model) addFormFoot() string {
+	f := m.addForm
+	var b strings.Builder
+	if m.detailStatus != "" {
+		b.WriteString(detailStatusStyle.Render(m.detailStatus) + "  ")
+	}
+	switch f.step {
+	case stepType:
+		b.WriteString(detailPromptStyle.Render("type: "))
+		b.WriteString(renderChoices(toAny(itemTypes), f.typeIdx))
+		b.WriteString(footerStyle.Render("   ←/→ choose · enter next · esc cancel"))
+	case stepPriority:
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s]  priority: ", itemTypes[f.typeIdx])))
+		labels := make([]any, len(itemPriorities))
+		for i, p := range itemPriorities {
+			labels[i] = fmt.Sprintf("p%d", p)
+		}
+		b.WriteString(renderChoices(labels, f.prioIdx))
+		b.WriteString(footerStyle.Render("   ←/→ or 1-3 · enter next · esc cancel"))
+	case stepTitle:
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s p%d]  title: ", itemTypes[f.typeIdx], itemPriorities[f.prioIdx])))
+		b.WriteString(m.detailInput.View())
+		b.WriteString(footerStyle.Render("   enter next · esc cancel"))
+	case stepDue:
+		b.WriteString(detailPromptStyle.Render("due (optional): "))
+		b.WriteString(m.detailInput.View())
+		b.WriteString(footerStyle.Render("   enter add · esc cancel"))
+	}
+	return b.String()
+}
+
+func toAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// renderChoices renders a horizontal option list with the selected index
+// highlighted (reusing the selection style) and the rest faint.
+func renderChoices(opts []any, sel int) string {
+	parts := make([]string, len(opts))
+	for i, o := range opts {
+		s := fmt.Sprintf("%v", o)
+		if i == sel {
+			parts[i] = itemSelStyle.Render(" " + s + " ")
+		} else {
+			parts[i] = emptyStyle.Render(" " + s + " ")
+		}
+	}
+	return strings.Join(parts, " ")
 }

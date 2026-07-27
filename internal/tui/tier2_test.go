@@ -311,6 +311,45 @@ func TestStageAdvanceCommits(t *testing.T) {
 	}
 }
 
+func TestStageAdvanceSetsHealth(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	// account starts in 'adoption'/'green'; renewal_risk should flip health to red.
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
+	m.detailInput.SetValue("renewal_risk")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.detail.c.health != "red" {
+		t.Errorf("header health = %q, want red", m.detail.c.health)
+	}
+	rows, _ := st.Query("SELECT stage,health FROM customers WHERE id='acme'")
+	if got := str(rows[0]["stage"]); got != "renewal_risk" {
+		t.Errorf("customer stage = %q, want renewal_risk", got)
+	}
+	if got := str(rows[0]["health"]); got != "red" {
+		t.Errorf("customer health = %q, want red", got)
+	}
+}
+
+func TestHealthForStage(t *testing.T) {
+	want := map[string]string{
+		"onboarding":   "yellow",
+		"adoption":     "green",
+		"expansion":    "green",
+		"renewal_risk": "red",
+		"renewed":      "green",
+	}
+	for stage, exp := range want {
+		if got := healthForStage(stage); got != exp {
+			t.Errorf("healthForStage(%q) = %q, want %q", stage, got, exp)
+		}
+	}
+	if got := healthForStage("unknown"); got != "yellow" {
+		t.Errorf("healthForStage(unknown) = %q, want yellow fallback", got)
+	}
+}
+
 func TestStageRejectsUnknown(t *testing.T) {
 	st, _ := setupRepo(t)
 	m := newDetailModel(st)

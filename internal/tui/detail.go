@@ -506,11 +506,15 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		id := newID("stg")
-		// Mirror `cs stage`: record the transition and update the customer's stage.
+		// Advancing the stage also moves health to the value that stage implies
+		// (healthForStage), so the two header fields stay in sync in one commit.
+		health := healthForStage(to)
+		// Mirror `cs stage`: record the transition and update the customer's
+		// stage, and set health to match the new stage.
 		query = fmt.Sprintf(
 			"INSERT INTO stage_events (id,customer_id,from_stage,to_stage,reason,occurred_at) VALUES (%s,%s,%s,%s,'',NOW());\n"+
-				"UPDATE customers SET stage=%s, updated_at=NOW() WHERE id=%s;",
-			q(id), q(m.detail.c.id), q(from), q(to), q(to), q(m.detail.c.id))
+				"UPDATE customers SET stage=%s, health=%s, updated_at=NOW() WHERE id=%s;",
+			q(id), q(m.detail.c.id), q(from), q(to), q(to), q(health), q(m.detail.c.id))
 		multi = true
 		commitMsg = "stage: " + m.detail.c.id + " " + from + "->" + to
 		okStatus = "✓ " + from + " → " + to
@@ -531,9 +535,11 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 		m.syncDetail()
 		return m, nil
 	}
-	// Advancing the stage changes the customer's stage; reflect it in the header.
+	// Advancing the stage changes the customer's stage and health; reflect
+	// both in the header before the reload lands.
 	if k == editStage {
 		m.detail.c.stage = val
+		m.detail.c.health = healthForStage(val)
 	}
 	if err := m.st.Commit(commitMsg); err != nil {
 		// The write already landed in the working set; reload to show real state.
@@ -552,6 +558,22 @@ func stageKnown(s string) bool {
 		}
 	}
 	return false
+}
+
+// healthForStage maps a journey stage to the health the account should carry
+// once it reaches that stage. Advancing the stage (s) applies this so health
+// tracks stage automatically instead of drifting. Any unmapped stage falls
+// back to yellow (neutral) rather than leaving stale health behind.
+func healthForStage(stage string) string {
+	switch stage {
+	case "onboarding":
+		return "yellow"
+	case "adoption", "expansion", "renewed":
+		return "green"
+	case "renewal_risk":
+		return "red"
+	}
+	return "yellow"
 }
 
 // resizeDetail sizes the detail viewport to the current window, leaving room for
@@ -701,7 +723,8 @@ func (m Model) detailView() string {
 
 	dot := lipgloss.NewStyle().Foreground(healthColor(d.c.health)).Render("●")
 	// stage + health are highlighted so it's clear they're the fields a stage
-	// change (s) touches — and, once auto-health lands, that both move together.
+	// change (s) touches — both move together (health tracks stage via
+	// healthForStage).
 	stageBadge := fieldHighlight.Render("stage " + pretty(d.c.stage))
 	healthBadge := healthField.Foreground(healthColor(d.c.health)).Render("health " + d.c.health)
 	header := detailHeaderStyle.Render(fmt.Sprintf("%s %s (%s)", dot, d.c.name, d.c.id)) +

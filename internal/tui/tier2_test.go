@@ -289,10 +289,12 @@ func TestNoteEscapesQuotes(t *testing.T) {
 func TestStageAdvanceCommits(t *testing.T) {
 	st, dir := setupRepo(t)
 	m := newDetailModel(st)
-	// account starts in 'adoption' (see setupRepo)
+	// account starts in 'adoption' (see setupRepo). The 's' selector seeds on
+	// the current stage; one 'j' (down) moves the highlight to 'expansion'.
 	nb, _ := m.beginEdit(editStage)
 	m = nb.(Model)
-	m.detailInput.SetValue("expansion")
+	nb, _ = m.updateStageSelect(keyMsg("j"))
+	m = nb.(Model)
 	next, _ := m.commitAction()
 	m = next.(Model)
 	if m.detail.c.stage != "expansion" {
@@ -311,19 +313,107 @@ func TestStageAdvanceCommits(t *testing.T) {
 	}
 }
 
-func TestStageRejectsUnknown(t *testing.T) {
+func TestStageAdvanceSetsHealth(t *testing.T) {
 	st, _ := setupRepo(t)
 	m := newDetailModel(st)
+	// account starts in 'adoption'/'green'; two downs reach 'renewal_risk',
+	// which should flip health to red.
 	nb, _ := m.beginEdit(editStage)
 	m = nb.(Model)
-	m.detailInput.SetValue("banana")
+	nb, _ = m.updateStageSelect(keyMsg("j"))
+	m = nb.(Model)
+	nb, _ = m.updateStageSelect(keyMsg("j"))
+	m = nb.(Model)
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.detail.c.health != "red" {
+		t.Errorf("header health = %q, want red", m.detail.c.health)
+	}
+	rows, _ := st.Query("SELECT stage,health FROM customers WHERE id='acme'")
+	if got := str(rows[0]["stage"]); got != "renewal_risk" {
+		t.Errorf("customer stage = %q, want renewal_risk", got)
+	}
+	if got := str(rows[0]["health"]); got != "red" {
+		t.Errorf("customer health = %q, want red", got)
+	}
+}
+
+func TestHealthForStage(t *testing.T) {
+	want := map[string]string{
+		"onboarding":   "yellow",
+		"adoption":     "green",
+		"expansion":    "green",
+		"renewal_risk": "red",
+		"renewed":      "green",
+	}
+	for stage, exp := range want {
+		if got := healthForStage(stage); got != exp {
+			t.Errorf("healthForStage(%q) = %q, want %q", stage, got, exp)
+		}
+	}
+	if got := healthForStage("unknown"); got != "yellow" {
+		t.Errorf("healthForStage(unknown) = %q, want yellow fallback", got)
+	}
+}
+
+func TestStageSelectorSeedsOnCurrentStage(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	// account starts in 'adoption' (index 1 of knownStages).
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
+	if got := knownStages[m.stageIdx]; got != "adoption" {
+		t.Errorf("selector seeded on %q, want adoption (the current stage)", got)
+	}
+	// esc cancels without committing: stage unchanged, no stage_event.
+	nb, _ = m.updateStageSelect(keyMsg("esc"))
+	m = nb.(Model)
+	if m.editKind != editNone {
+		t.Errorf("esc should close the selector; editKind = %v", m.editKind)
+	}
+	ev, _ := st.Query("SELECT id FROM stage_events WHERE customer_id='acme'")
+	if len(ev) != 0 {
+		t.Errorf("cancel wrote a stage_event: %v", ev)
+	}
+}
+
+func TestStageSelectorRejectsSameStage(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	// selector seeds on the current stage ('adoption'); committing without
+	// moving is a no-op that keeps the selector open with feedback.
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
 	next, _ := m.commitAction()
 	m = next.(Model)
 	if m.editKind != editStage {
-		t.Errorf("unknown stage should keep input open")
+		t.Errorf("same-stage commit should keep the selector open; editKind = %v", m.editKind)
 	}
-	if !strings.Contains(m.detailStatus, "unknown stage") {
-		t.Errorf("status = %q, want unknown stage", m.detailStatus)
+	if !strings.Contains(m.detailStatus, "already in") {
+		t.Errorf("status = %q, want 'already in'", m.detailStatus)
+	}
+	ev, _ := st.Query("SELECT id FROM stage_events WHERE customer_id='acme'")
+	if len(ev) != 0 {
+		t.Errorf("same-stage commit wrote a stage_event: %v", ev)
+	}
+}
+
+func TestStageSelectorWrapsAround(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	// seeded on 'adoption' (index 1); one up wraps toward 'onboarding' (index 0).
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
+	nb, _ = m.updateStageSelect(keyMsg("k"))
+	m = nb.(Model)
+	if got := knownStages[m.stageIdx]; got != "onboarding" {
+		t.Errorf("after up, highlight = %q, want onboarding", got)
+	}
+	// one more up wraps to the last stage.
+	nb, _ = m.updateStageSelect(keyMsg("k"))
+	m = nb.(Model)
+	if got := knownStages[m.stageIdx]; got != knownStages[len(knownStages)-1] {
+		t.Errorf("up past first should wrap to last; got %q", got)
 	}
 }
 

@@ -22,8 +22,8 @@ const (
 	editStage          // advance the account to a new stage
 )
 
-// knownStages is the ordered journey used to validate the stage action's input;
-// mirrors laneOrder so the TUI accepts the same stage names the board shows.
+// knownStages is the ordered journey the stage action's ('s') dropdown lists;
+// mirrors laneOrder so the TUI offers the same stage names the board shows.
 var knownStages = laneOrder
 
 // itemTypes / itemPriorities are the fixed enums the add form cycles through,
@@ -133,6 +133,13 @@ var (
 	detailStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Padding(0, 1)
 	detailPromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Padding(0, 1)
 	dueSoonStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // upcoming due date (amber)
+
+	// fieldHighlight backgrounds the header's stage field so it's visually
+	// distinct as the value the stage action (s) updates. healthField is the
+	// same treatment for health, with the foreground colored by healthColor at
+	// render time.
+	fieldHighlight = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true).Padding(0, 1)
+	healthField    = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true).Padding(0, 1)
 )
 
 // selectedItem returns the currently highlighted Open item row, or nil if the
@@ -156,16 +163,34 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q", "backspace", "left":
 		m.mode = modeBoard
 		return m, nil
+	// Action keys are scoped to the pane they belong to, matching the footer
+	// hints: item actions on Open items, note on Recent activity, stage on
+	// Trajectory. A key pressed on the wrong pane is a no-op.
 	case "r":
-		return m.resolveSelected()
+		if m.detailFocus == paneItems {
+			return m.resolveSelected()
+		}
+		return m, nil
 	case "d":
-		return m.beginEdit(editDue)
+		if m.detailFocus == paneItems {
+			return m.beginEdit(editDue)
+		}
+		return m, nil
 	case "a":
-		return m.beginEdit(editAdd)
+		if m.detailFocus == paneItems {
+			return m.beginEdit(editAdd)
+		}
+		return m, nil
 	case "n":
-		return m.beginEdit(editNote)
+		if m.detailFocus == paneActivity {
+			return m.beginEdit(editNote)
+		}
+		return m, nil
 	case "s":
-		return m.beginEdit(editStage)
+		if m.detailFocus == paneTrajectory {
+			return m.beginEdit(editStage)
+		}
+		return m, nil
 	case "tab":
 		m.detailStatus = ""
 		m.detailFocus = (m.detailFocus + 1) % detailPaneCount
@@ -249,11 +274,10 @@ func editPrompt(k editKind, m Model) string {
 			id = str(it["id"])
 		}
 		return "due for " + id + " (YYYY-MM-DD, empty clears)"
-	// editAdd has its own multi-step footer (addFormFoot), not a single prompt.
+	// editAdd and editStage have their own dropdown footers (addFormFoot /
+	// stageFoot), not a single-line prompt.
 	case editNote:
 		return "note"
-	case editStage:
-		return "advance to stage (" + strings.Join(knownStages, "/") + ")"
 	}
 	return ""
 }
@@ -268,6 +292,16 @@ func (m Model) beginEdit(k editKind) (tea.Model, tea.Cmd) {
 	}
 	if k == editAdd {
 		return m.beginAddForm()
+	}
+	if k == editStage {
+		// Stage is a fixed enum, so it's a dropdown selector (like the add
+		// form's type/priority) rather than free text. Start on the current
+		// stage highlighted so the list reads as "where you are → pick next".
+		m.editKind = editStage
+		m.detailStatus = ""
+		m.stageIdx = stageIndex(m.detail.c.stage)
+		m.detailInput.Blur() // the selector doesn't use the text input
+		return m, nil
 	}
 	m.editKind = k
 	m.detailStatus = ""
@@ -304,6 +338,9 @@ func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.editKind == editAdd {
 		return m.updateAddForm(msg)
 	}
+	if m.editKind == editStage {
+		return m.updateStageSelect(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.editKind = editNone
@@ -316,6 +353,26 @@ func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.detailInput, cmd = m.detailInput.Update(msg)
 	return m, cmd
+}
+
+// updateStageSelect drives the 's' stage dropdown: ↑/↓ (and vi keys) move the
+// highlight through knownStages, enter commits the chosen stage, esc cancels.
+func (m Model) updateStageSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editKind = editNone
+		m.syncDetail()
+		return m, nil
+	case "up", "k", "left", "h":
+		m.stageIdx = (m.stageIdx + len(knownStages) - 1) % len(knownStages)
+		return m, nil
+	case "down", "j", "right", "l", "tab":
+		m.stageIdx = (m.stageIdx + 1) % len(knownStages)
+		return m, nil
+	case "enter":
+		return m.commitAction()
+	}
+	return m, nil
 }
 
 // updateAddForm drives the add-item form's steps. esc cancels the whole form
@@ -332,9 +389,9 @@ func (m Model) updateAddForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.addForm.step {
 	case stepType:
 		switch msg.String() {
-		case "left", "h":
+		case "up", "k", "left", "h":
 			m.addForm.typeIdx = (m.addForm.typeIdx + len(itemTypes) - 1) % len(itemTypes)
-		case "right", "l", "tab":
+		case "down", "j", "right", "l", "tab":
 			m.addForm.typeIdx = (m.addForm.typeIdx + 1) % len(itemTypes)
 		case "enter":
 			m.addForm.step = stepPriority
@@ -342,9 +399,9 @@ func (m Model) updateAddForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stepPriority:
 		switch msg.String() {
-		case "left", "h":
+		case "up", "k", "left", "h":
 			m.addForm.prioIdx = (m.addForm.prioIdx + len(itemPriorities) - 1) % len(itemPriorities)
-		case "right", "l", "tab":
+		case "down", "j", "right", "l", "tab":
 			m.addForm.prioIdx = (m.addForm.prioIdx + 1) % len(itemPriorities)
 		case "1", "2", "3":
 			m.addForm.prioIdx = int(msg.String()[0] - '1')
@@ -468,12 +525,10 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 		commitMsg = "note: " + m.detail.c.id + " - " + val
 		okStatus = "✓ noted"
 	case editStage:
-		to := val
-		if !stageKnown(to) {
-			m.detailStatus = "✗ unknown stage; use one of: " + strings.Join(knownStages, ", ")
-			m.syncDetail()
-			return m, nil
-		}
+		// The stage comes from the dropdown selection (knownStages[stageIdx]),
+		// not the text input — so it's always a valid stage by construction.
+		to := knownStages[m.stageIdx]
+		val = to // keep the header-refresh below (which uses val) in sync
 		from := m.detail.c.stage
 		if to == from {
 			m.detailStatus = "✗ already in " + to
@@ -481,11 +536,15 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		id := newID("stg")
-		// Mirror `cs stage`: record the transition and update the customer's stage.
+		// Advancing the stage also moves health to the value that stage implies
+		// (healthForStage), so the two header fields stay in sync in one commit.
+		health := healthForStage(to)
+		// Mirror `cs stage`: record the transition and update the customer's
+		// stage, and set health to match the new stage.
 		query = fmt.Sprintf(
 			"INSERT INTO stage_events (id,customer_id,from_stage,to_stage,reason,occurred_at) VALUES (%s,%s,%s,%s,'',NOW());\n"+
-				"UPDATE customers SET stage=%s, updated_at=NOW() WHERE id=%s;",
-			q(id), q(m.detail.c.id), q(from), q(to), q(to), q(m.detail.c.id))
+				"UPDATE customers SET stage=%s, health=%s, updated_at=NOW() WHERE id=%s;",
+			q(id), q(m.detail.c.id), q(from), q(to), q(to), q(health), q(m.detail.c.id))
 		multi = true
 		commitMsg = "stage: " + m.detail.c.id + " " + from + "->" + to
 		okStatus = "✓ " + from + " → " + to
@@ -506,9 +565,11 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 		m.syncDetail()
 		return m, nil
 	}
-	// Advancing the stage changes the customer's stage; reflect it in the header.
+	// Advancing the stage changes the customer's stage and health; reflect
+	// both in the header before the reload lands.
 	if k == editStage {
 		m.detail.c.stage = val
+		m.detail.c.health = healthForStage(val)
 	}
 	if err := m.st.Commit(commitMsg); err != nil {
 		// The write already landed in the working set; reload to show real state.
@@ -519,14 +580,32 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 	return m, loadDetail(m.st, m.detail.c)
 }
 
-// stageKnown reports whether s is one of the journey stages the board renders.
-func stageKnown(s string) bool {
-	for _, k := range knownStages {
+// stageIndex returns the position of stage s in knownStages, or 0 (the first
+// stage) if s isn't a known stage. Used to seed the 's' dropdown highlight on
+// the account's current stage.
+func stageIndex(s string) int {
+	for i, k := range knownStages {
 		if k == s {
-			return true
+			return i
 		}
 	}
-	return false
+	return 0
+}
+
+// healthForStage maps a journey stage to the health the account should carry
+// once it reaches that stage. Advancing the stage (s) applies this so health
+// tracks stage automatically instead of drifting. Any unmapped stage falls
+// back to yellow (neutral) rather than leaving stale health behind.
+func healthForStage(stage string) string {
+	switch stage {
+	case "onboarding":
+		return "yellow"
+	case "adoption", "expansion", "renewed":
+		return "green"
+	case "renewal_risk":
+		return "red"
+	}
+	return "yellow"
 }
 
 // resizeDetail sizes the detail viewport to the current window, leaving room for
@@ -675,8 +754,13 @@ func (m Model) detailView() string {
 	}
 
 	dot := lipgloss.NewStyle().Foreground(healthColor(d.c.health)).Render("●")
+	// stage + health are highlighted so it's clear they're the fields a stage
+	// change (s) touches — both move together (health tracks stage via
+	// healthForStage).
+	stageBadge := fieldHighlight.Render("stage " + pretty(d.c.stage))
+	healthBadge := healthField.Foreground(healthColor(d.c.health)).Render("health " + d.c.health)
 	header := detailHeaderStyle.Render(fmt.Sprintf("%s %s (%s)", dot, d.c.name, d.c.id)) +
-		detailMetaStyle.Render(fmt.Sprintf("   stage %s · health %s", pretty(d.c.stage), d.c.health))
+		"   " + stageBadge + " " + healthBadge
 
 	// Guard against an unsized viewport (no WindowSizeMsg yet): render the body
 	// directly so the page is never blank.
@@ -685,22 +769,59 @@ func (m Model) detailView() string {
 		body = m.detailBody()
 	}
 
-	// Bottom line: the add form's current step, else the active action's prompt,
-	// else the last action's status, else the key hints.
+	// Bottom region: the add form's current step (may be multi-line for the
+	// type/priority dropdowns), else the active action's prompt, else the last
+	// action's status + pane-scoped hints, else the pane-scoped key hints.
+	// Actions are scoped to the focused pane so item actions don't show while
+	// you're tabbed onto Activity/Trajectory.
 	var foot string
 	switch {
 	case m.editKind == editAdd:
 		foot = m.addFormFoot()
+	case m.editKind == editStage:
+		foot = m.stageFoot()
 	case m.editKind != editNone:
 		foot = detailPromptStyle.Render(editPrompt(m.editKind, m)+": ") + m.detailInput.View() +
 			footerStyle.Render("   enter save · esc cancel")
 	case m.detailStatus != "":
-		foot = detailStatusStyle.Render(m.detailStatus) +
-			footerStyle.Render("   r resolve · d due · a add · n note · s stage")
+		foot = detailStatusStyle.Render(m.detailStatus) + footerStyle.Render("   "+m.paneActions())
 	default:
-		foot = footerStyle.Render("tab pane · ↑/↓ select · r resolve · d due · a add · n note · s stage · esc back")
+		foot = footerStyle.Render("tab pane · ↑/↓ select/scroll · " + m.paneActions() + " · esc back")
+	}
+
+	// Keep header + body + foot within the window: a multi-line foot (the add
+	// dropdowns) borrows lines from the bottom of the scrollable body so the
+	// layout doesn't overflow the alt-screen.
+	if extra := strings.Count(foot, "\n"); extra > 0 && m.detailVP.Height > 0 {
+		body = trimTrailingLines(body, extra)
 	}
 	return header + "\n" + body + "\n" + foot + "\n"
+}
+
+// trimTrailingLines drops the last n lines of s (used to make room for a
+// multi-line footer without overflowing the fixed-height view).
+func trimTrailingLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if n >= len(lines) {
+		return ""
+	}
+	return strings.Join(lines[:len(lines)-n], "\n")
+}
+
+// paneActions returns the action-key hints valid for the currently focused pane.
+// Item actions (resolve/due/add) belong to Open items; note to Recent activity;
+// stage to Trajectory. This keeps the footer honest about what a keypress does
+// where the focus is.
+func (m Model) paneActions() string {
+	switch m.detailFocus {
+	case paneItems:
+		return "r resolve · d due · a add"
+	case paneActivity:
+		return "n note"
+	case paneTrajectory:
+		return "s stage"
+	}
+	return ""
 }
 
 // addFormFoot renders the add-item form's current step in the footer: the
@@ -715,48 +836,57 @@ func (m Model) addFormFoot() string {
 	}
 	switch f.step {
 	case stepType:
-		b.WriteString(detailPromptStyle.Render("type: "))
-		b.WriteString(renderChoices(toAny(itemTypes), f.typeIdx))
-		b.WriteString(footerStyle.Render("   ←/→ choose · enter next · esc cancel"))
+		b.WriteString(detailPromptStyle.Render("type ▾") + footerStyle.Render("   ↑/↓ choose · enter next · esc cancel") + "\n")
+		b.WriteString(renderDropdown(itemTypes, f.typeIdx))
 	case stepPriority:
-		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s]  priority: ", itemTypes[f.typeIdx])))
-		labels := make([]any, len(itemPriorities))
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s]  priority ▾", itemTypes[f.typeIdx])) +
+			footerStyle.Render("   ↑/↓ or 1-3 · enter next · esc cancel") + "\n")
+		labels := make([]string, len(itemPriorities))
 		for i, p := range itemPriorities {
 			labels[i] = fmt.Sprintf("p%d", p)
 		}
-		b.WriteString(renderChoices(labels, f.prioIdx))
-		b.WriteString(footerStyle.Render("   ←/→ or 1-3 · enter next · esc cancel"))
+		b.WriteString(renderDropdown(labels, f.prioIdx))
 	case stepTitle:
 		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s p%d]  title: ", itemTypes[f.typeIdx], itemPriorities[f.prioIdx])))
 		b.WriteString(m.detailInput.View())
 		b.WriteString(footerStyle.Render("   enter next · esc cancel"))
 	case stepDue:
-		b.WriteString(detailPromptStyle.Render("due (optional): "))
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s p%d]  due (optional): ", itemTypes[f.typeIdx], itemPriorities[f.prioIdx])))
 		b.WriteString(m.detailInput.View())
 		b.WriteString(footerStyle.Render("   enter add · esc cancel"))
 	}
 	return b.String()
 }
 
-func toAny(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
+// stageFoot renders the 's' stage dropdown: the known stages as a vertical
+// list with the highlighted choice marked, mirroring the add form's enum
+// dropdowns. The current stage is annotated so it's clear where the account is
+// moving from.
+func (m Model) stageFoot() string {
+	var b strings.Builder
+	if m.detailStatus != "" {
+		b.WriteString(detailStatusStyle.Render(m.detailStatus) + "  ")
 	}
-	return out
+	b.WriteString(detailPromptStyle.Render("stage ▾  ") +
+		footerStyle.Render("from "+pretty(m.detail.c.stage)+"   ↑/↓ choose · enter advance · esc cancel") + "\n")
+	labels := make([]string, len(knownStages))
+	for i, s := range knownStages {
+		labels[i] = pretty(s)
+	}
+	b.WriteString(renderDropdown(labels, m.stageIdx))
+	return b.String()
 }
 
-// renderChoices renders a horizontal option list with the selected index
-// highlighted (reusing the selection style) and the rest faint.
-func renderChoices(opts []any, sel int) string {
-	parts := make([]string, len(opts))
+// renderDropdown renders a vertical option list (a simple dropdown): the
+// selected row gets a ▸ marker and the selection background, the rest are faint.
+func renderDropdown(opts []string, sel int) string {
+	lines := make([]string, len(opts))
 	for i, o := range opts {
-		s := fmt.Sprintf("%v", o)
 		if i == sel {
-			parts[i] = itemSelStyle.Render(" " + s + " ")
+			lines[i] = itemSelStyle.Render(" ▸ " + o + " ")
 		} else {
-			parts[i] = emptyStyle.Render(" " + s + " ")
+			lines[i] = emptyStyle.Render("   " + o + " ")
 		}
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(lines, "\n")
 }

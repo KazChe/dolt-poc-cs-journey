@@ -101,9 +101,10 @@ type Model struct {
 	detailItem   int             // selected row in the Open items pane
 	detailVP     viewport.Model  // scrolls the focused pane's content
 	detailStatus string          // one-line feedback after an action (e.g. "✓ resolved itm-x")
-	detailInput  textinput.Model // inline text entry (due/note/stage + add's title/due steps)
+	detailInput  textinput.Model // inline text entry (due/note + add's title/due steps)
 	editKind     editKind        // which inline action is currently capturing input
 	addForm      addForm         // multi-step state for the 'a' add-item form (editAdd only)
+	stageIdx     int             // selected stage in the 's' dropdown (indexes knownStages; editStage only)
 
 	// chat pane
 	input     textinput.Model

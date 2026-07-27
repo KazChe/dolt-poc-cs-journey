@@ -104,12 +104,12 @@ func TestCommitDueSetAndClear(t *testing.T) {
 	m := newDetailModel(st)
 
 	// set a valid due date
-	m.dueEditing = true
+	m.editKind = editDue
 	m.detailInput.SetValue("2026-09-01")
-	next, _ := m.commitDue()
+	next, _ := m.commitAction()
 	m = next.(Model)
-	if m.dueEditing {
-		t.Errorf("dueEditing should be false after commit")
+	if m.editKind != editNone {
+		t.Errorf("editKind should be editNone after commit")
 	}
 	rows, _ := st.Query("SELECT due_at FROM items WHERE id='itm-1'")
 	if got := str(rows[0]["due_at"]); !strings.HasPrefix(got, "2026-09-01") {
@@ -117,9 +117,9 @@ func TestCommitDueSetAndClear(t *testing.T) {
 	}
 
 	// clear it
-	m.dueEditing = true
+	m.editKind = editDue
 	m.detailInput.SetValue("")
-	next, _ = m.commitDue()
+	next, _ = m.commitAction()
 	m = next.(Model)
 	rows, _ = st.Query("SELECT due_at FROM items WHERE id='itm-1'")
 	if got := rows[0]["due_at"]; got != nil {
@@ -130,14 +130,145 @@ func TestCommitDueSetAndClear(t *testing.T) {
 func TestCommitDueRejectsBadDate(t *testing.T) {
 	st, _ := setupRepo(t)
 	m := newDetailModel(st)
-	m.dueEditing = true
+	m.editKind = editDue
 	m.detailInput.SetValue("soon")
-	next, _ := m.commitDue()
+	next, _ := m.commitAction()
 	m = next.(Model)
-	if !m.dueEditing {
-		t.Errorf("bad date should keep input open (dueEditing=true)")
+	if m.editKind != editDue {
+		t.Errorf("bad date should keep input open (editKind=editDue)")
 	}
 	if !strings.Contains(m.detailStatus, "invalid date") {
 		t.Errorf("status = %q, want invalid date", m.detailStatus)
 	}
+}
+
+func TestAddItemCommits(t *testing.T) {
+	st, dir := setupRepo(t)
+	m := newDetailModel(st)
+	nb, _ := m.beginEdit(editAdd)
+	m = nb.(Model)
+	m.detailInput.SetValue("new blocker")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.editKind != editNone {
+		t.Errorf("editKind should reset after add")
+	}
+	rows, _ := st.Query("SELECT id,type,priority,status FROM items WHERE customer_id='acme' AND title='new blocker'")
+	if len(rows) != 1 {
+		t.Fatalf("want 1 new item, got %d", len(rows))
+	}
+	if got := str(rows[0]["type"]); got != "action" {
+		t.Errorf("type = %q, want action (default)", got)
+	}
+	if got := asIntTest(rows[0]["priority"]); got != 2 {
+		t.Errorf("priority = %d, want 2 (default)", got)
+	}
+	if msg := lastCommitMsg(t, dir); !strings.Contains(msg, "new blocker") {
+		t.Errorf("HEAD commit = %q, want the add commit", msg)
+	}
+}
+
+func TestAddItemRejectsEmpty(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	nb, _ := m.beginEdit(editAdd)
+	m = nb.(Model)
+	m.detailInput.SetValue("   ")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.editKind != editAdd {
+		t.Errorf("empty title should keep input open")
+	}
+	if !strings.Contains(m.detailStatus, "title is required") {
+		t.Errorf("status = %q, want title required", m.detailStatus)
+	}
+}
+
+func TestNoteCommits(t *testing.T) {
+	st, dir := setupRepo(t)
+	m := newDetailModel(st)
+	nb, _ := m.beginEdit(editNote)
+	m = nb.(Model)
+	m.detailInput.SetValue("called about renewal")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	rows, _ := st.Query("SELECT kind,summary FROM activities WHERE customer_id='acme'")
+	if len(rows) != 1 || str(rows[0]["kind"]) != "note" || str(rows[0]["summary"]) != "called about renewal" {
+		t.Fatalf("note not recorded correctly: %v", rows)
+	}
+	if msg := lastCommitMsg(t, dir); !strings.Contains(msg, "note:") {
+		t.Errorf("HEAD commit = %q, want the note commit", msg)
+	}
+}
+
+// TestNoteEscapesQuotes locks in that user text with a single quote is stored
+// verbatim (not broken or truncated), i.e. q() escaping holds on the write path.
+func TestNoteEscapesQuotes(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	const summary = "O'Brien said it's fine"
+	nb, _ := m.beginEdit(editNote)
+	m = nb.(Model)
+	m.detailInput.SetValue(summary)
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.editKind != editNone {
+		t.Errorf("commit should have closed the input; status=%q", m.detailStatus)
+	}
+	rows, _ := st.Query("SELECT summary FROM activities WHERE customer_id='acme'")
+	if len(rows) != 1 || str(rows[0]["summary"]) != summary {
+		t.Fatalf("summary round-trip failed: %v", rows)
+	}
+}
+
+func TestStageAdvanceCommits(t *testing.T) {
+	st, dir := setupRepo(t)
+	m := newDetailModel(st)
+	// account starts in 'adoption' (see setupRepo)
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
+	m.detailInput.SetValue("expansion")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.detail.c.stage != "expansion" {
+		t.Errorf("header stage = %q, want expansion", m.detail.c.stage)
+	}
+	rows, _ := st.Query("SELECT stage FROM customers WHERE id='acme'")
+	if got := str(rows[0]["stage"]); got != "expansion" {
+		t.Errorf("customer stage = %q, want expansion", got)
+	}
+	ev, _ := st.Query("SELECT from_stage,to_stage FROM stage_events WHERE customer_id='acme'")
+	if len(ev) != 1 || str(ev[0]["from_stage"]) != "adoption" || str(ev[0]["to_stage"]) != "expansion" {
+		t.Fatalf("stage_event not recorded: %v", ev)
+	}
+	if msg := lastCommitMsg(t, dir); !strings.Contains(msg, "adoption->expansion") {
+		t.Errorf("HEAD commit = %q, want the stage commit", msg)
+	}
+}
+
+func TestStageRejectsUnknown(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	nb, _ := m.beginEdit(editStage)
+	m = nb.(Model)
+	m.detailInput.SetValue("banana")
+	next, _ := m.commitAction()
+	m = next.(Model)
+	if m.editKind != editStage {
+		t.Errorf("unknown stage should keep input open")
+	}
+	if !strings.Contains(m.detailStatus, "unknown stage") {
+		t.Errorf("status = %q, want unknown stage", m.detailStatus)
+	}
+}
+
+// asIntTest coerces a dolt JSON numeric to int for assertions.
+func asIntTest(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	}
+	return toInt(v)
 }

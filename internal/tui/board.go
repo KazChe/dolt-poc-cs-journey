@@ -101,8 +101,8 @@ type Model struct {
 	detailItem   int             // selected row in the Open items pane
 	detailVP     viewport.Model  // scrolls the focused pane's content
 	detailStatus string          // one-line feedback after an action (e.g. "✓ resolved itm-x")
-	detailInput  textinput.Model // due-date entry, shown only while dueEditing
-	dueEditing   bool            // true while capturing a due date for the selected item
+	detailInput  textinput.Model // inline text entry (due/add/note/stage), shown only while editKind != editNone
+	editKind     editKind        // which inline action is currently capturing input
 
 	// chat pane
 	input     textinput.Model
@@ -309,7 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		if m.mode == modeDetail && m.dueEditing {
+		if m.mode == modeDetail && m.editKind != editNone {
 			var cmd tea.Cmd
 			m.detailInput, cmd = m.detailInput.Update(msg)
 			return m, cmd

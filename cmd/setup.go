@@ -192,7 +192,10 @@ func shellSnippet() (string, error) {
 		exe = abs
 	}
 	cmd := shellQuote(exe) + " due --quiet"
-	if repo := resolveRepoDir(); repo != "" {
+	// Bake in the resolved repo (absolute) so the snippet fires from any startup
+	// directory. resolveRepoDir always returns a path now (~/.cs by default).
+	{
+		repo := resolveRepoDir()
 		if abs, err := filepath.Abs(repo); err == nil {
 			repo = abs
 		}
@@ -387,7 +390,10 @@ func hookCommand() (string, error) {
 		exe = abs
 	}
 	cmd := shellQuote(exe) + " prime --hook-json"
-	if repo := resolveRepoDir(); repo != "" {
+	// Bake in the resolved repo (absolute) so the hook fires from any project
+	// directory. resolveRepoDir always returns a path now (~/.cs by default).
+	{
+		repo := resolveRepoDir()
 		if abs, err := filepath.Abs(repo); err == nil {
 			repo = abs
 		}

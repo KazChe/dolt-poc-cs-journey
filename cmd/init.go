@@ -15,8 +15,18 @@ var schemaSQL string
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Create the cs tables in the Dolt repo and commit",
+	Long: "Creates the cs tables in the data repo and commits them. The repo is the\n" +
+		"first of: --repo, $CS_DIR, ~/.cs/config, or the ~/.cs default. If the target\n" +
+		"is not a Dolt repo yet, init creates and `dolt init`s it, so `cs init` with no\n" +
+		"flags bootstraps ~/.cs on a fresh machine.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		st := mustStore()
+		// Resolve the repo directly (not via mustStore, which refuses a
+		// not-yet-initialized dir) and bootstrap it if needed.
+		dir := resolveRepoDir()
+		st := store.New(dir)
+		if err := st.EnsureInit(); err != nil {
+			return err
+		}
 		if err := st.ExecScript(schemaSQL); err != nil {
 			return err
 		}
@@ -29,7 +39,7 @@ var initCmd = &cobra.Command{
 		if err := st.Commit("cs: init schema"); err != nil {
 			return err
 		}
-		fmt.Println("✓ schema created and committed")
+		fmt.Printf("✓ schema created and committed in %s\n", dir)
 		return nil
 	},
 }

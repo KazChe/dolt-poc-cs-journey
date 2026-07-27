@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -27,6 +29,23 @@ func (s *Store) run(args ...string) (string, string, error) {
 	cmd.Stderr = &errb
 	err := cmd.Run()
 	return out.String(), errb.String(), err
+}
+
+// EnsureInit makes sure Dir exists and is an initialized Dolt repo, running
+// `dolt init` when it is not (so `cs init` on a fresh default home creates the
+// repo instead of erroring). It is a no-op when Dir already has a .dolt
+// directory, so it is safe to call on every init.
+func (s *Store) EnsureInit() error {
+	if info, err := os.Stat(filepath.Join(s.Dir, ".dolt")); err == nil && info.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
+		return fmt.Errorf("create repo dir %s: %w", s.Dir, err)
+	}
+	if _, errOut, err := s.run("init"); err != nil {
+		return fmt.Errorf("dolt init: %v: %s", err, strings.TrimSpace(errOut))
+	}
+	return nil
 }
 
 // Exec runs a single SQL statement, expecting no result set.

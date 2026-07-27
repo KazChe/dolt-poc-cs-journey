@@ -96,10 +96,13 @@ type Model struct {
 	detail        detail
 	detailLoading bool
 
-	// detail page navigation (read-only)
-	detailFocus detailPane     // which pane tab has focused
-	detailItem  int            // selected row in the Open items pane
-	detailVP    viewport.Model // scrolls the focused pane's content
+	// detail page navigation + inline actions
+	detailFocus  detailPane      // which pane tab has focused
+	detailItem   int             // selected row in the Open items pane
+	detailVP     viewport.Model  // scrolls the focused pane's content
+	detailStatus string          // one-line feedback after an action (e.g. "✓ resolved itm-x")
+	detailInput  textinput.Model // due-date entry, shown only while dueEditing
+	dueEditing   bool            // true while capturing a due date for the selected item
 
 	// chat pane
 	input     textinput.Model
@@ -120,7 +123,10 @@ func New(st *store.Store) Model {
 	ti.CharLimit = 500
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	return Model{st: st, input: ti, vp: viewport.New(0, 0), detailVP: viewport.New(0, 0), spinner: sp}
+	di := textinput.New()
+	di.Placeholder = "YYYY-MM-DD (empty clears)"
+	di.CharLimit = 10
+	return Model{st: st, input: ti, vp: viewport.New(0, 0), detailVP: viewport.New(0, 0), detailInput: di, spinner: sp}
 }
 
 func (m Model) Init() tea.Cmd { return tea.Batch(load(m.st), tick()) }
@@ -301,6 +307,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+		if m.mode == modeDetail && m.dueEditing {
+			var cmd tea.Cmd
+			m.detailInput, cmd = m.detailInput.Update(msg)
 			return m, cmd
 		}
 	}

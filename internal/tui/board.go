@@ -58,6 +58,18 @@ type detail struct {
 	err    error
 }
 
+// detailPane identifies which section of the detail page currently has focus.
+// tab cycles through them; the focused pane is scrolled by ↑/↓ and its border is
+// highlighted.
+type detailPane int
+
+const (
+	paneItems detailPane = iota
+	paneActivity
+	paneTrajectory
+	detailPaneCount
+)
+
 type loadedMsg struct {
 	custs []customer
 	err   error
@@ -84,6 +96,11 @@ type Model struct {
 	detail        detail
 	detailLoading bool
 
+	// detail page navigation (read-only)
+	detailFocus detailPane     // which pane tab has focused
+	detailItem  int            // selected row in the Open items pane
+	detailVP    viewport.Model // scrolls the focused pane's content
+
 	// chat pane
 	input     textinput.Model
 	vp        viewport.Model
@@ -103,7 +120,7 @@ func New(st *store.Store) Model {
 	ti.CharLimit = 500
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	return Model{st: st, input: ti, vp: viewport.New(0, 0), spinner: sp}
+	return Model{st: st, input: ti, vp: viewport.New(0, 0), detailVP: viewport.New(0, 0), spinner: sp}
 }
 
 func (m Model) Init() tea.Cmd { return tea.Batch(load(m.st), tick()) }
@@ -192,11 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.mode == modeDetail {
-			switch msg.String() {
-			case "esc", "q", "enter", "backspace", "left":
-				m.mode = modeBoard
-			}
-			return m, nil
+			return m.updateDetail(msg)
 		}
 		switch msg.String() {
 		case "q", "esc":
@@ -217,6 +230,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = modeDetail
 				m.detail = detail{c: c}
 				m.detailLoading = true
+				m.detailFocus = paneItems
+				m.detailItem = 0
 				return m, loadDetail(m.st, c)
 			}
 		case "c":
@@ -229,6 +244,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureVisible()
 		m.resizeChat()
 		m.syncViewport()
+		m.resizeDetail()
+		m.syncDetail()
 	case loadedMsg:
 		m.err = msg.err
 		m.lastLoad = time.Now()
@@ -239,6 +256,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case detailMsg:
 		m.detail = msg.d
 		m.detailLoading = false
+		m.detailItem = clamp(m.detailItem, 0, max(0, len(m.detail.items)-1))
+		m.resizeDetail()
+		m.syncDetail()
 	case tickMsg:
 		return m, tea.Batch(load(m.st), tick())
 	case chatTextMsg:
@@ -433,60 +453,6 @@ func (m Model) View() string {
 		out += scroll + "\n"
 	}
 	return out + board + "\n" + foot + "\n"
-}
-
-func (m Model) detailView() string {
-	d := m.detail
-	if m.detailLoading {
-		return fmt.Sprintf("\n  loading %s ...\n\n  esc to go back\n", d.c.name)
-	}
-	if d.err != nil {
-		return fmt.Sprintf("\n  error: %v\n\n  esc to go back\n", d.err)
-	}
-
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(fmt.Sprintf("%s (%s)   stage=%s   health=%s",
-		d.c.name, d.c.id, d.c.stage, d.c.health)))
-	b.WriteString("\n\n")
-
-	b.WriteString(sectionStyle.Render("Open items (oldest first)"))
-	b.WriteString("\n")
-	if len(d.items) == 0 {
-		b.WriteString("  (none)\n")
-	}
-	for _, r := range d.items {
-		b.WriteString(fmt.Sprintf("  %-12v p%-2v %-8v %v  (%s old)\n",
-			str(r["id"]), str(r["priority"]), str(r["type"]), str(r["title"]), ageDays(r["created_at"])))
-	}
-
-	b.WriteString("\n")
-	b.WriteString(sectionStyle.Render("Recent activity"))
-	b.WriteString("\n")
-	if len(d.acts) == 0 {
-		b.WriteString("  (none)\n")
-	}
-	for _, r := range d.acts {
-		b.WriteString(fmt.Sprintf("  [%v] %v  (%s ago)\n", str(r["kind"]), str(r["summary"]), ageDays(r["occurred_at"])))
-	}
-
-	b.WriteString("\n")
-	b.WriteString(sectionStyle.Render("Trajectory"))
-	b.WriteString("\n")
-	if len(d.stages) == 0 {
-		b.WriteString("  (no recorded transitions)\n")
-	}
-	for _, r := range d.stages {
-		reason := ""
-		if s := str(r["reason"]); s != "" && s != "<nil>" {
-			reason = "  (" + s + ")"
-		}
-		b.WriteString(fmt.Sprintf("  %v -> %v%s\n", str(r["from_stage"]), str(r["to_stage"]), reason))
-	}
-
-	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("esc back · ctrl+c quit"))
-	b.WriteString("\n")
-	return b.String()
 }
 
 func renderLane(l lane, selLane bool, selCard int) string {

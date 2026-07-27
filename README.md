@@ -40,19 +40,27 @@ go build -o cs .
    dolt config --global --add user.email "you@example.com"
    ```
 
-2. Create the data repo that will hold your customer journeys:
+2. Create the data repo and its tables:
 
    ```bash
-   mkdir cs-journey && cd cs-journey
-   dolt init
-   ```
-
-3. Point `cs` at it and create the tables:
-
-   ```bash
-   export CS_DIR="$PWD"      # or pass --repo <path> to any command
    cs init
    ```
+
+   With no flags, `cs init` creates and initializes the repo at `~/.cs` (a Dolt
+   repo plus the cs tables), and every `cs` command uses it by default from any
+   directory. No environment variable to set.
+
+   Already have a repo somewhere, or want it elsewhere? Point `cs` at it once and
+   it's remembered in `~/.cs/config`:
+
+   ```bash
+   cs config set-repo /path/to/your/repo   # records the location
+   cs init                                 # creates the tables there
+   cs config show                          # prints the resolved repo + why
+   ```
+
+   For a one-off, `--repo <path>` or `CS_DIR=<path>` overrides the default on a
+   single command.
 
 ## Usage
 
@@ -151,8 +159,16 @@ is a fenced block, so it is appended without touching the rest of your
 
 ## Configuration
 
-- `--repo <path>` or the `CS_DIR` environment variable selects the Dolt data
-  repo. It defaults to the current directory.
+`cs` resolves its data repo in this order, most specific first:
+
+1. `--repo <path>` flag
+2. `CS_DIR` environment variable
+3. the path recorded in `~/.cs/config` (set via `cs config set-repo <path>`)
+4. the `~/.cs` default
+
+There is deliberately no current-directory fallback, so the repo `cs` uses never
+depends on which folder you run from. `cs config show` prints the resolved repo
+and which of the above selected it.
 
 ## Notes
 

@@ -133,6 +133,13 @@ var (
 	detailStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Padding(0, 1)
 	detailPromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Padding(0, 1)
 	dueSoonStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // upcoming due date (amber)
+
+	// fieldHighlight backgrounds the header's stage field so it's visually
+	// distinct as the value the stage action (s) updates. healthField is the
+	// same treatment for health, with the foreground colored by healthColor at
+	// render time.
+	fieldHighlight = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true).Padding(0, 1)
+	healthField    = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true).Padding(0, 1)
 )
 
 // selectedItem returns the currently highlighted Open item row, or nil if the
@@ -156,16 +163,34 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q", "backspace", "left":
 		m.mode = modeBoard
 		return m, nil
+	// Action keys are scoped to the pane they belong to, matching the footer
+	// hints: item actions on Open items, note on Recent activity, stage on
+	// Trajectory. A key pressed on the wrong pane is a no-op.
 	case "r":
-		return m.resolveSelected()
+		if m.detailFocus == paneItems {
+			return m.resolveSelected()
+		}
+		return m, nil
 	case "d":
-		return m.beginEdit(editDue)
+		if m.detailFocus == paneItems {
+			return m.beginEdit(editDue)
+		}
+		return m, nil
 	case "a":
-		return m.beginEdit(editAdd)
+		if m.detailFocus == paneItems {
+			return m.beginEdit(editAdd)
+		}
+		return m, nil
 	case "n":
-		return m.beginEdit(editNote)
+		if m.detailFocus == paneActivity {
+			return m.beginEdit(editNote)
+		}
+		return m, nil
 	case "s":
-		return m.beginEdit(editStage)
+		if m.detailFocus == paneTrajectory {
+			return m.beginEdit(editStage)
+		}
+		return m, nil
 	case "tab":
 		m.detailStatus = ""
 		m.detailFocus = (m.detailFocus + 1) % detailPaneCount
@@ -332,9 +357,9 @@ func (m Model) updateAddForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.addForm.step {
 	case stepType:
 		switch msg.String() {
-		case "left", "h":
+		case "up", "k", "left", "h":
 			m.addForm.typeIdx = (m.addForm.typeIdx + len(itemTypes) - 1) % len(itemTypes)
-		case "right", "l", "tab":
+		case "down", "j", "right", "l", "tab":
 			m.addForm.typeIdx = (m.addForm.typeIdx + 1) % len(itemTypes)
 		case "enter":
 			m.addForm.step = stepPriority
@@ -342,9 +367,9 @@ func (m Model) updateAddForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stepPriority:
 		switch msg.String() {
-		case "left", "h":
+		case "up", "k", "left", "h":
 			m.addForm.prioIdx = (m.addForm.prioIdx + len(itemPriorities) - 1) % len(itemPriorities)
-		case "right", "l", "tab":
+		case "down", "j", "right", "l", "tab":
 			m.addForm.prioIdx = (m.addForm.prioIdx + 1) % len(itemPriorities)
 		case "1", "2", "3":
 			m.addForm.prioIdx = int(msg.String()[0] - '1')
@@ -675,8 +700,12 @@ func (m Model) detailView() string {
 	}
 
 	dot := lipgloss.NewStyle().Foreground(healthColor(d.c.health)).Render("●")
+	// stage + health are highlighted so it's clear they're the fields a stage
+	// change (s) touches — and, once auto-health lands, that both move together.
+	stageBadge := fieldHighlight.Render("stage " + pretty(d.c.stage))
+	healthBadge := healthField.Foreground(healthColor(d.c.health)).Render("health " + d.c.health)
 	header := detailHeaderStyle.Render(fmt.Sprintf("%s %s (%s)", dot, d.c.name, d.c.id)) +
-		detailMetaStyle.Render(fmt.Sprintf("   stage %s · health %s", pretty(d.c.stage), d.c.health))
+		"   " + stageBadge + " " + healthBadge
 
 	// Guard against an unsized viewport (no WindowSizeMsg yet): render the body
 	// directly so the page is never blank.
@@ -685,8 +714,11 @@ func (m Model) detailView() string {
 		body = m.detailBody()
 	}
 
-	// Bottom line: the add form's current step, else the active action's prompt,
-	// else the last action's status, else the key hints.
+	// Bottom region: the add form's current step (may be multi-line for the
+	// type/priority dropdowns), else the active action's prompt, else the last
+	// action's status + pane-scoped hints, else the pane-scoped key hints.
+	// Actions are scoped to the focused pane so item actions don't show while
+	// you're tabbed onto Activity/Trajectory.
 	var foot string
 	switch {
 	case m.editKind == editAdd:
@@ -695,12 +727,44 @@ func (m Model) detailView() string {
 		foot = detailPromptStyle.Render(editPrompt(m.editKind, m)+": ") + m.detailInput.View() +
 			footerStyle.Render("   enter save · esc cancel")
 	case m.detailStatus != "":
-		foot = detailStatusStyle.Render(m.detailStatus) +
-			footerStyle.Render("   r resolve · d due · a add · n note · s stage")
+		foot = detailStatusStyle.Render(m.detailStatus) + footerStyle.Render("   "+m.paneActions())
 	default:
-		foot = footerStyle.Render("tab pane · ↑/↓ select · r resolve · d due · a add · n note · s stage · esc back")
+		foot = footerStyle.Render("tab pane · ↑/↓ select/scroll · " + m.paneActions() + " · esc back")
+	}
+
+	// Keep header + body + foot within the window: a multi-line foot (the add
+	// dropdowns) borrows lines from the bottom of the scrollable body so the
+	// layout doesn't overflow the alt-screen.
+	if extra := strings.Count(foot, "\n"); extra > 0 && m.detailVP.Height > 0 {
+		body = trimTrailingLines(body, extra)
 	}
 	return header + "\n" + body + "\n" + foot + "\n"
+}
+
+// trimTrailingLines drops the last n lines of s (used to make room for a
+// multi-line footer without overflowing the fixed-height view).
+func trimTrailingLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if n >= len(lines) {
+		return ""
+	}
+	return strings.Join(lines[:len(lines)-n], "\n")
+}
+
+// paneActions returns the action-key hints valid for the currently focused pane.
+// Item actions (resolve/due/add) belong to Open items; note to Recent activity;
+// stage to Trajectory. This keeps the footer honest about what a keypress does
+// where the focus is.
+func (m Model) paneActions() string {
+	switch m.detailFocus {
+	case paneItems:
+		return "r resolve · d due · a add"
+	case paneActivity:
+		return "n note"
+	case paneTrajectory:
+		return "s stage"
+	}
+	return ""
 }
 
 // addFormFoot renders the add-item form's current step in the footer: the
@@ -715,48 +779,38 @@ func (m Model) addFormFoot() string {
 	}
 	switch f.step {
 	case stepType:
-		b.WriteString(detailPromptStyle.Render("type: "))
-		b.WriteString(renderChoices(toAny(itemTypes), f.typeIdx))
-		b.WriteString(footerStyle.Render("   ←/→ choose · enter next · esc cancel"))
+		b.WriteString(detailPromptStyle.Render("type ▾") + footerStyle.Render("   ↑/↓ choose · enter next · esc cancel") + "\n")
+		b.WriteString(renderDropdown(itemTypes, f.typeIdx))
 	case stepPriority:
-		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s]  priority: ", itemTypes[f.typeIdx])))
-		labels := make([]any, len(itemPriorities))
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s]  priority ▾", itemTypes[f.typeIdx])) +
+			footerStyle.Render("   ↑/↓ or 1-3 · enter next · esc cancel") + "\n")
+		labels := make([]string, len(itemPriorities))
 		for i, p := range itemPriorities {
 			labels[i] = fmt.Sprintf("p%d", p)
 		}
-		b.WriteString(renderChoices(labels, f.prioIdx))
-		b.WriteString(footerStyle.Render("   ←/→ or 1-3 · enter next · esc cancel"))
+		b.WriteString(renderDropdown(labels, f.prioIdx))
 	case stepTitle:
 		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s p%d]  title: ", itemTypes[f.typeIdx], itemPriorities[f.prioIdx])))
 		b.WriteString(m.detailInput.View())
 		b.WriteString(footerStyle.Render("   enter next · esc cancel"))
 	case stepDue:
-		b.WriteString(detailPromptStyle.Render("due (optional): "))
+		b.WriteString(detailPromptStyle.Render(fmt.Sprintf("[%s p%d]  due (optional): ", itemTypes[f.typeIdx], itemPriorities[f.prioIdx])))
 		b.WriteString(m.detailInput.View())
 		b.WriteString(footerStyle.Render("   enter add · esc cancel"))
 	}
 	return b.String()
 }
 
-func toAny(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-	return out
-}
-
-// renderChoices renders a horizontal option list with the selected index
-// highlighted (reusing the selection style) and the rest faint.
-func renderChoices(opts []any, sel int) string {
-	parts := make([]string, len(opts))
+// renderDropdown renders a vertical option list (a simple dropdown): the
+// selected row gets a ▸ marker and the selection background, the rest are faint.
+func renderDropdown(opts []string, sel int) string {
+	lines := make([]string, len(opts))
 	for i, o := range opts {
-		s := fmt.Sprintf("%v", o)
 		if i == sel {
-			parts[i] = itemSelStyle.Render(" " + s + " ")
+			lines[i] = itemSelStyle.Render(" ▸ " + o + " ")
 		} else {
-			parts[i] = emptyStyle.Render(" " + s + " ")
+			lines[i] = emptyStyle.Render("   " + o + " ")
 		}
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(lines, "\n")
 }

@@ -158,7 +158,7 @@ func loadDetail(st *store.Store, c customer) tea.Cmd {
 	return func() tea.Msg {
 		d := detail{c: c}
 		var err error
-		if d.items, err = st.Query("SELECT id,type,priority,title,created_at FROM items WHERE customer_id=" +
+		if d.items, err = st.Query("SELECT id,type,priority,title,created_at,due_at FROM items WHERE customer_id=" +
 			q(c.id) + " AND status<>'resolved' ORDER BY created_at"); err != nil {
 			return detailMsg{detail{c: c, err: err}}
 		}

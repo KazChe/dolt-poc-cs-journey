@@ -22,8 +22,8 @@ const (
 	editStage          // advance the account to a new stage
 )
 
-// knownStages is the ordered journey used to validate the stage action's input;
-// mirrors laneOrder so the TUI accepts the same stage names the board shows.
+// knownStages is the ordered journey the stage action's ('s') dropdown lists;
+// mirrors laneOrder so the TUI offers the same stage names the board shows.
 var knownStages = laneOrder
 
 // itemTypes / itemPriorities are the fixed enums the add form cycles through,
@@ -274,11 +274,10 @@ func editPrompt(k editKind, m Model) string {
 			id = str(it["id"])
 		}
 		return "due for " + id + " (YYYY-MM-DD, empty clears)"
-	// editAdd has its own multi-step footer (addFormFoot), not a single prompt.
+	// editAdd and editStage have their own dropdown footers (addFormFoot /
+	// stageFoot), not a single-line prompt.
 	case editNote:
 		return "note"
-	case editStage:
-		return "advance to stage (" + strings.Join(knownStages, "/") + ")"
 	}
 	return ""
 }
@@ -293,6 +292,16 @@ func (m Model) beginEdit(k editKind) (tea.Model, tea.Cmd) {
 	}
 	if k == editAdd {
 		return m.beginAddForm()
+	}
+	if k == editStage {
+		// Stage is a fixed enum, so it's a dropdown selector (like the add
+		// form's type/priority) rather than free text. Start on the current
+		// stage highlighted so the list reads as "where you are → pick next".
+		m.editKind = editStage
+		m.detailStatus = ""
+		m.stageIdx = stageIndex(m.detail.c.stage)
+		m.detailInput.Blur() // the selector doesn't use the text input
+		return m, nil
 	}
 	m.editKind = k
 	m.detailStatus = ""
@@ -329,6 +338,9 @@ func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.editKind == editAdd {
 		return m.updateAddForm(msg)
 	}
+	if m.editKind == editStage {
+		return m.updateStageSelect(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.editKind = editNone
@@ -341,6 +353,26 @@ func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.detailInput, cmd = m.detailInput.Update(msg)
 	return m, cmd
+}
+
+// updateStageSelect drives the 's' stage dropdown: ↑/↓ (and vi keys) move the
+// highlight through knownStages, enter commits the chosen stage, esc cancels.
+func (m Model) updateStageSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editKind = editNone
+		m.syncDetail()
+		return m, nil
+	case "up", "k", "left", "h":
+		m.stageIdx = (m.stageIdx + len(knownStages) - 1) % len(knownStages)
+		return m, nil
+	case "down", "j", "right", "l", "tab":
+		m.stageIdx = (m.stageIdx + 1) % len(knownStages)
+		return m, nil
+	case "enter":
+		return m.commitAction()
+	}
+	return m, nil
 }
 
 // updateAddForm drives the add-item form's steps. esc cancels the whole form
@@ -493,12 +525,10 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 		commitMsg = "note: " + m.detail.c.id + " - " + val
 		okStatus = "✓ noted"
 	case editStage:
-		to := val
-		if !stageKnown(to) {
-			m.detailStatus = "✗ unknown stage; use one of: " + strings.Join(knownStages, ", ")
-			m.syncDetail()
-			return m, nil
-		}
+		// The stage comes from the dropdown selection (knownStages[stageIdx]),
+		// not the text input — so it's always a valid stage by construction.
+		to := knownStages[m.stageIdx]
+		val = to // keep the header-refresh below (which uses val) in sync
 		from := m.detail.c.stage
 		if to == from {
 			m.detailStatus = "✗ already in " + to
@@ -550,14 +580,16 @@ func (m Model) commitAction() (tea.Model, tea.Cmd) {
 	return m, loadDetail(m.st, m.detail.c)
 }
 
-// stageKnown reports whether s is one of the journey stages the board renders.
-func stageKnown(s string) bool {
-	for _, k := range knownStages {
+// stageIndex returns the position of stage s in knownStages, or 0 (the first
+// stage) if s isn't a known stage. Used to seed the 's' dropdown highlight on
+// the account's current stage.
+func stageIndex(s string) int {
+	for i, k := range knownStages {
 		if k == s {
-			return true
+			return i
 		}
 	}
-	return false
+	return 0
 }
 
 // healthForStage maps a journey stage to the health the account should carry
@@ -746,6 +778,8 @@ func (m Model) detailView() string {
 	switch {
 	case m.editKind == editAdd:
 		foot = m.addFormFoot()
+	case m.editKind == editStage:
+		foot = m.stageFoot()
 	case m.editKind != editNone:
 		foot = detailPromptStyle.Render(editPrompt(m.editKind, m)+": ") + m.detailInput.View() +
 			footerStyle.Render("   enter save · esc cancel")
@@ -821,6 +855,25 @@ func (m Model) addFormFoot() string {
 		b.WriteString(m.detailInput.View())
 		b.WriteString(footerStyle.Render("   enter add · esc cancel"))
 	}
+	return b.String()
+}
+
+// stageFoot renders the 's' stage dropdown: the known stages as a vertical
+// list with the highlighted choice marked, mirroring the add form's enum
+// dropdowns. The current stage is annotated so it's clear where the account is
+// moving from.
+func (m Model) stageFoot() string {
+	var b strings.Builder
+	if m.detailStatus != "" {
+		b.WriteString(detailStatusStyle.Render(m.detailStatus) + "  ")
+	}
+	b.WriteString(detailPromptStyle.Render("stage ▾  ") +
+		footerStyle.Render("from "+pretty(m.detail.c.stage)+"   ↑/↓ choose · enter advance · esc cancel") + "\n")
+	labels := make([]string, len(knownStages))
+	for i, s := range knownStages {
+		labels[i] = pretty(s)
+	}
+	b.WriteString(renderDropdown(labels, m.stageIdx))
 	return b.String()
 }
 

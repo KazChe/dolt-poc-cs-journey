@@ -9,6 +9,35 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// dueAnnotation renders an item's due_at as a compact suffix relative to today,
+// mirroring the CLI's dueAnnotation: "due <date>" when upcoming, "⚠ overdue
+// <date>" once the date has passed (today still counts as due). The bool is
+// true when overdue, so the caller can color it. Empty string for a null/unset
+// date so the caller omits it.
+func dueAnnotation(v any) (text string, overdue bool) {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return "", false
+	}
+	var d time.Time
+	var err error
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04:05", time.RFC3339} {
+		if d, err = time.Parse(layout, s); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return "", false
+	}
+	day := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if day.Before(today) {
+		return "⚠ overdue " + day.Format("2006-01-02"), true
+	}
+	return "due " + day.Format("2006-01-02"), false
+}
+
 // dueSQLLiteral turns a user-entered due date into a SQL literal: NULL for an
 // empty string (clear the date), or a quoted YYYY-MM-DD after validation. It
 // mirrors the CLI's dueLiteral so the TUI and `cs item due` accept the same
@@ -41,6 +70,7 @@ var (
 
 	detailStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Padding(0, 1)
 	detailPromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Padding(0, 1)
+	dueSoonStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // upcoming due date (amber)
 )
 
 // selectedItem returns the currently highlighted Open item row, or nil if the
@@ -263,6 +293,17 @@ func (m Model) detailBody() string {
 		}
 		line := fmt.Sprintf("%-12v %s %-8v %v  (%s old)",
 			str(r["id"]), prio, str(r["type"]), str(r["title"]), ageDays(r["created_at"]))
+		// Show the due date when set: "due <date>" upcoming, "⚠ overdue <date>"
+		// past — same convention as `cs show` / `cs item ls`.
+		if due, overdue := dueAnnotation(r["due_at"]); due != "" {
+			if selected {
+				line += "  " + due // whole row is styled below; don't nest a color
+			} else if overdue {
+				line += "  " + prioHotStyle.Render(due)
+			} else {
+				line += "  " + dueSoonStyle.Render(due)
+			}
+		}
 		if selected {
 			line = itemSelStyle.Render("▸ " + line)
 		} else {

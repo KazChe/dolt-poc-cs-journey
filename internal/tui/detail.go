@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -8,6 +9,37 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// editKind identifies which inline action is currently capturing text in
+// detailInput. editNone means no input is open (normal navigation).
+type editKind int
+
+const (
+	editNone  editKind = iota
+	editDue            // set/clear due date on the selected item
+	editAdd            // add a new item (title)
+	editNote           // append a note (summary)
+	editStage          // advance the account to a new stage
+)
+
+// knownStages is the ordered journey used to validate the stage action's input;
+// mirrors laneOrder so the TUI accepts the same stage names the board shows.
+var knownStages = laneOrder
+
+// idAlphabet + newID mirror the CLI's id generation (cmd/util.go) so ids created
+// from the TUI look the same as ids created from `cs`.
+const idAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+func newID(prefix string) string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s-%06x", prefix, time.Now().UnixNano()&0xffffff)
+	}
+	for i := range b {
+		b[i] = idAlphabet[int(b[i])%len(idAlphabet)]
+	}
+	return prefix + "-" + string(b)
+}
 
 // dueAnnotation renders an item's due_at as a compact suffix relative to today,
 // mirroring the CLI's dueAnnotation: "due <date>" when upcoming, "⚠ overdue
@@ -83,12 +115,12 @@ func (m Model) selectedItem() map[string]any {
 }
 
 // updateDetail handles key input while the detail page is showing. Navigation
-// (tab/↑/↓/g/G) is read-only; the action keys r (resolve) and d (set/clear due)
-// mutate the selected item and commit immediately (commit-on-action), then
-// reload the detail. While capturing a due date, all keys go to the input.
+// (tab/↑/↓/g/G) is read-only; the action keys mutate and commit immediately
+// (commit-on-action), then reload the detail: r resolve, d due, a add item,
+// n note, s advance stage. While an inline input is open, all keys go to it.
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.dueEditing {
-		return m.updateDueInput(msg)
+	if m.editKind != editNone {
+		return m.updateActionInput(msg)
 	}
 	switch msg.String() {
 	case "esc", "q", "backspace", "left":
@@ -97,7 +129,13 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m.resolveSelected()
 	case "d":
-		return m.beginDueEdit()
+		return m.beginEdit(editDue)
+	case "a":
+		return m.beginEdit(editAdd)
+	case "n":
+		return m.beginEdit(editNote)
+	case "s":
+		return m.beginEdit(editStage)
 	case "tab":
 		m.detailStatus = ""
 		m.detailFocus = (m.detailFocus + 1) % detailPaneCount
@@ -172,76 +210,184 @@ func (m Model) resolveSelected() (tea.Model, tea.Cmd) {
 	return m, loadDetail(m.st, m.detail.c)
 }
 
-// beginDueEdit opens the inline due-date input for the selected item.
-func (m Model) beginDueEdit() (tea.Model, tea.Cmd) {
-	if m.selectedItem() == nil {
+// editPrompt returns the label shown before the inline input for each action.
+func editPrompt(k editKind, m Model) string {
+	switch k {
+	case editDue:
+		id := ""
+		if it := m.selectedItem(); it != nil {
+			id = str(it["id"])
+		}
+		return "due for " + id + " (YYYY-MM-DD, empty clears)"
+	case editAdd:
+		return "new item title"
+	case editNote:
+		return "note"
+	case editStage:
+		return "advance to stage (" + strings.Join(knownStages, "/") + ")"
+	}
+	return ""
+}
+
+// beginEdit opens the inline input for the given action. Actions that operate on
+// the selected item (due) require a selection; add/note/stage act on the account
+// and don't.
+func (m Model) beginEdit(k editKind) (tea.Model, tea.Cmd) {
+	if k == editDue && m.selectedItem() == nil {
 		return m, nil
 	}
-	m.dueEditing = true
+	m.editKind = k
 	m.detailStatus = ""
 	m.detailInput.SetValue("")
+	// A due date is exactly 10 chars; titles/notes need real room. Set the cap
+	// and placeholder per action so the shared input doesn't truncate free text
+	// or show a stale hint.
+	if k == editDue {
+		m.detailInput.CharLimit = 10
+		m.detailInput.Placeholder = "YYYY-MM-DD"
+	} else {
+		m.detailInput.CharLimit = 255
+		m.detailInput.Placeholder = ""
+	}
 	m.detailInput.Focus()
 	return m, textinputBlink
 }
 
-// updateDueInput captures keystrokes while the due-date input is open. Enter
-// commits the new date (empty clears it), esc cancels.
-func (m Model) updateDueInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// updateActionInput captures keystrokes while any inline action input is open.
+// Enter applies the action, esc cancels.
+func (m Model) updateActionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.dueEditing = false
+		m.editKind = editNone
 		m.detailInput.Blur()
 		m.syncDetail()
 		return m, nil
 	case "enter":
-		return m.commitDue()
+		return m.commitAction()
 	}
 	var cmd tea.Cmd
 	m.detailInput, cmd = m.detailInput.Update(msg)
 	return m, cmd
 }
 
-// commitDue validates and applies the entered due date to the selected item,
-// commits, and reloads. An empty value clears the due date.
-func (m Model) commitDue() (tea.Model, tea.Cmd) {
-	it := m.selectedItem()
-	if it == nil {
-		m.dueEditing = false
-		m.detailInput.Blur()
+// commitAction validates the input for the active editKind, runs the write +
+// commit, and reloads the detail. Validation errors keep the input open so the
+// user can correct; a nil error closes it. SQL mirrors the equivalent cs CLI
+// command exactly.
+func (m Model) commitAction() (tea.Model, tea.Cmd) {
+	k := m.editKind
+	val := strings.TrimSpace(m.detailInput.Value())
+
+	var query, commitMsg, okStatus string
+	var multi bool // true when query has multiple statements (needs ExecScript)
+	switch k {
+	case editDue:
+		it := m.selectedItem()
+		if it == nil {
+			m.editKind = editNone
+			m.detailInput.Blur()
+			return m, nil
+		}
+		id := str(it["id"])
+		lit, err := dueSQLLiteral(val)
+		if err != nil {
+			m.detailStatus = "✗ " + err.Error()
+			m.syncDetail()
+			return m, nil
+		}
+		query = fmt.Sprintf("UPDATE items SET due_at=%s WHERE id=%s", lit, q(id))
+		if val == "" {
+			commitMsg, okStatus = "item: due "+id+" cleared", "✓ cleared due on "+id
+		} else {
+			commitMsg, okStatus = "item: due "+id+" "+val, "✓ "+id+" due "+val
+		}
+	case editAdd:
+		if val == "" {
+			m.detailStatus = "✗ a title is required"
+			m.syncDetail()
+			return m, nil
+		}
+		id := newID("itm")
+		// Quick-add with `cs item add`'s flag defaults (type=action, priority=2);
+		// created_at/status fall to their schema defaults. Choosing a different
+		// type or priority is still a CLI job — the TUI keeps add to one keystroke.
+		query = fmt.Sprintf(
+			"INSERT INTO items (id,customer_id,type,title,priority,status) VALUES (%s,%s,'action',%s,2,'open')",
+			q(id), q(m.detail.c.id), q(val))
+		commitMsg = "item: " + id + " " + val + " (" + m.detail.c.id + ")"
+		okStatus = "✓ added " + id
+	case editNote:
+		if val == "" {
+			m.detailStatus = "✗ a note is required"
+			m.syncDetail()
+			return m, nil
+		}
+		id := newID("act")
+		query = fmt.Sprintf(
+			"INSERT INTO activities (id,customer_id,kind,summary,occurred_at) VALUES (%s,%s,'note',%s,NOW())",
+			q(id), q(m.detail.c.id), q(val))
+		commitMsg = "note: " + m.detail.c.id + " - " + val
+		okStatus = "✓ noted"
+	case editStage:
+		to := val
+		if !stageKnown(to) {
+			m.detailStatus = "✗ unknown stage; use one of: " + strings.Join(knownStages, ", ")
+			m.syncDetail()
+			return m, nil
+		}
+		from := m.detail.c.stage
+		if to == from {
+			m.detailStatus = "✗ already in " + to
+			m.syncDetail()
+			return m, nil
+		}
+		id := newID("stg")
+		// Mirror `cs stage`: record the transition and update the customer's stage.
+		query = fmt.Sprintf(
+			"INSERT INTO stage_events (id,customer_id,from_stage,to_stage,reason,occurred_at) VALUES (%s,%s,%s,%s,'',NOW());\n"+
+				"UPDATE customers SET stage=%s, updated_at=NOW() WHERE id=%s;",
+			q(id), q(m.detail.c.id), q(from), q(to), q(to), q(m.detail.c.id))
+		multi = true
+		commitMsg = "stage: " + m.detail.c.id + " " + from + "->" + to
+		okStatus = "✓ " + from + " → " + to
+	default:
+		m.editKind = editNone
 		return m, nil
 	}
-	id := str(it["id"])
-	date := strings.TrimSpace(m.detailInput.Value())
-	lit, err := dueSQLLiteral(date)
-	if err != nil {
-		// Keep the input open so the user can correct the date.
-		m.detailStatus = "✗ " + err.Error()
-		m.syncDetail()
-		return m, nil
-	}
-	m.dueEditing = false
+
+	m.editKind = editNone
 	m.detailInput.Blur()
-	if err := m.st.Exec(fmt.Sprintf("UPDATE items SET due_at=%s WHERE id=%s", lit, q(id))); err != nil {
-		m.detailStatus = "✗ due update failed: " + err.Error()
+
+	exec := m.st.Exec
+	if multi {
+		exec = m.st.ExecScript // multi-statement (stage)
+	}
+	if err := exec(query); err != nil {
+		m.detailStatus = "✗ failed: " + err.Error()
 		m.syncDetail()
 		return m, nil
 	}
-	msg := "item: due " + id + " cleared"
-	if date != "" {
-		msg = "item: due " + id + " " + date
+	// Advancing the stage changes the customer's stage; reflect it in the header.
+	if k == editStage {
+		m.detail.c.stage = val
 	}
-	if err := m.st.Commit(msg); err != nil {
-		// The UPDATE already landed in the working set; reload so the view
-		// reflects the real DB state even though the commit didn't complete.
+	if err := m.st.Commit(commitMsg); err != nil {
+		// The write already landed in the working set; reload to show real state.
 		m.detailStatus = "✗ commit failed: " + err.Error()
 		return m, loadDetail(m.st, m.detail.c)
 	}
-	if date == "" {
-		m.detailStatus = "✓ cleared due on " + id
-	} else {
-		m.detailStatus = "✓ " + id + " due " + date
-	}
+	m.detailStatus = okStatus
 	return m, loadDetail(m.st, m.detail.c)
+}
+
+// stageKnown reports whether s is one of the journey stages the board renders.
+func stageKnown(s string) bool {
+	for _, k := range knownStages {
+		if k == s {
+			return true
+		}
+	}
+	return false
 }
 
 // resizeDetail sizes the detail viewport to the current window, leaving room for
@@ -400,22 +546,18 @@ func (m Model) detailView() string {
 		body = m.detailBody()
 	}
 
-	// Bottom line: the due-date prompt while editing, else the last action's
-	// status, else the key hints.
+	// Bottom line: the active action's prompt while editing, else the last
+	// action's status, else the key hints.
 	var foot string
 	switch {
-	case m.dueEditing:
-		id := ""
-		if it := m.selectedItem(); it != nil {
-			id = str(it["id"])
-		}
-		foot = detailPromptStyle.Render("due for "+id+": ") + m.detailInput.View() +
+	case m.editKind != editNone:
+		foot = detailPromptStyle.Render(editPrompt(m.editKind, m)+": ") + m.detailInput.View() +
 			footerStyle.Render("   enter save · esc cancel")
 	case m.detailStatus != "":
 		foot = detailStatusStyle.Render(m.detailStatus) +
-			footerStyle.Render("   r resolve · d due · esc back")
+			footerStyle.Render("   r resolve · d due · a add · n note · s stage")
 	default:
-		foot = footerStyle.Render("tab pane · ↑/↓ select · r resolve · d due · esc back · ctrl+c quit")
+		foot = footerStyle.Render("tab pane · ↑/↓ select · r resolve · d due · a add · n note · s stage · esc back")
 	}
 	return header + "\n" + body + "\n" + foot + "\n"
 }

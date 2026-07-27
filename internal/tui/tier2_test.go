@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/KazChe/cs/internal/store"
 )
 
@@ -142,18 +144,50 @@ func TestCommitDueRejectsBadDate(t *testing.T) {
 	}
 }
 
-func TestAddItemCommits(t *testing.T) {
+// keyMsg builds a tea.KeyMsg for a named key (e.g. "enter", "left", "1").
+func keyMsg(s string) tea.KeyMsg {
+	switch s {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	default:
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+	}
+}
+
+// sendKeys walks the add form through a sequence of keys via updateAddForm,
+// exercising the real step logic. Text steps: set the input value then pass
+// "enter" (typing char-by-char through textinput is covered separately).
+func sendKeys(m Model, keys ...string) Model {
+	for _, k := range keys {
+		next, _ := m.updateAddForm(keyMsg(k))
+		m = next.(Model)
+	}
+	return m
+}
+
+func TestAddItemFormDefaults(t *testing.T) {
 	st, dir := setupRepo(t)
 	m := newDetailModel(st)
-	nb, _ := m.beginEdit(editAdd)
+	nb, _ := m.beginEdit(editAdd) // starts the form (type=action, priority=2)
 	m = nb.(Model)
-	m.detailInput.SetValue("new blocker")
-	next, _ := m.commitAction()
-	m = next.(Model)
-	if m.editKind != editNone {
-		t.Errorf("editKind should reset after add")
+	if m.editKind != editAdd || m.addForm.step != stepType {
+		t.Fatalf("form did not start on type step")
 	}
-	rows, _ := st.Query("SELECT id,type,priority,status FROM items WHERE customer_id='acme' AND title='new blocker'")
+	// accept defaults: enter (type) → enter (priority) → title → enter → no due → enter
+	m = sendKeys(m, "enter", "enter")
+	m.detailInput.SetValue("new blocker")
+	m = sendKeys(m, "enter") // title → due step
+	m = sendKeys(m, "enter") // empty due → commit
+	if m.editKind != editNone {
+		t.Errorf("editKind should reset after add; status=%q", m.detailStatus)
+	}
+	rows, _ := st.Query("SELECT type,priority,status,due_at FROM items WHERE customer_id='acme' AND title='new blocker'")
 	if len(rows) != 1 {
 		t.Fatalf("want 1 new item, got %d", len(rows))
 	}
@@ -163,21 +197,52 @@ func TestAddItemCommits(t *testing.T) {
 	if got := asIntTest(rows[0]["priority"]); got != 2 {
 		t.Errorf("priority = %d, want 2 (default)", got)
 	}
+	if rows[0]["due_at"] != nil {
+		t.Errorf("due_at = %v, want NULL (empty due)", rows[0]["due_at"])
+	}
 	if msg := lastCommitMsg(t, dir); !strings.Contains(msg, "new blocker") {
 		t.Errorf("HEAD commit = %q, want the add commit", msg)
 	}
 }
 
-func TestAddItemRejectsEmpty(t *testing.T) {
+func TestAddItemFormChoosesTypePriorityDue(t *testing.T) {
 	st, _ := setupRepo(t)
 	m := newDetailModel(st)
 	nb, _ := m.beginEdit(editAdd)
 	m = nb.(Model)
+	// type: default idx 3 (action); left once → question (idx 2)
+	m = sendKeys(m, "left", "enter")
+	// priority: default idx 1 (p2); press "1" → p1
+	m = sendKeys(m, "1", "enter")
+	m.detailInput.SetValue("SSO bug")
+	m = sendKeys(m, "enter") // → due step
+	m.detailInput.SetValue("2026-09-15")
+	m = sendKeys(m, "enter") // commit
+	rows, _ := st.Query("SELECT type,priority,due_at FROM items WHERE customer_id='acme' AND title='SSO bug'")
+	if len(rows) != 1 {
+		t.Fatalf("want 1 item, got %d", len(rows))
+	}
+	if got := str(rows[0]["type"]); got != "question" {
+		t.Errorf("type = %q, want question", got)
+	}
+	if got := asIntTest(rows[0]["priority"]); got != 1 {
+		t.Errorf("priority = %d, want 1", got)
+	}
+	if got := str(rows[0]["due_at"]); !strings.HasPrefix(got, "2026-09-15") {
+		t.Errorf("due_at = %q, want 2026-09-15", got)
+	}
+}
+
+func TestAddItemRejectsEmptyTitle(t *testing.T) {
+	st, _ := setupRepo(t)
+	m := newDetailModel(st)
+	nb, _ := m.beginEdit(editAdd)
+	m = nb.(Model)
+	m = sendKeys(m, "enter", "enter") // to title step
 	m.detailInput.SetValue("   ")
-	next, _ := m.commitAction()
-	m = next.(Model)
-	if m.editKind != editAdd {
-		t.Errorf("empty title should keep input open")
+	m = sendKeys(m, "enter") // empty title
+	if m.addForm.step != stepTitle {
+		t.Errorf("empty title should stay on title step, got step %d", m.addForm.step)
 	}
 	if !strings.Contains(m.detailStatus, "title is required") {
 		t.Errorf("status = %q, want title required", m.detailStatus)

@@ -116,13 +116,18 @@ func (m Model) detailBody() string {
 		items.WriteString(emptyStyle.Render("(none)"))
 	}
 	for i, r := range d.items {
+		selected := m.detailFocus == paneItems && i == m.detailItem
+		// Priority gets a red emphasis only on unselected rows. On the selected
+		// row we style the whole line with itemSelStyle instead; nesting an
+		// already-styled span inside it would embed an ANSI reset that cuts the
+		// selection background short mid-line.
 		prio := fmt.Sprintf("p%-2v", str(r["priority"]))
-		if str(r["priority"]) == "1" {
+		if !selected && str(r["priority"]) == "1" {
 			prio = prioHotStyle.Render(prio)
 		}
 		line := fmt.Sprintf("%-12v %s %-8v %v  (%s old)",
 			str(r["id"]), prio, str(r["type"]), str(r["title"]), ageDays(r["created_at"]))
-		if m.detailFocus == paneItems && i == m.detailItem {
+		if selected {
 			line = itemSelStyle.Render("▸ " + line)
 		} else {
 			line = "  " + line
